@@ -1,6 +1,6 @@
 # Merged: UX pass
 
-*Implemented in v3 (October 2026): everything below except #5 and #12 (cut), with #3 folded into #4. One change found on the device: the rear's window is read from HyperOS (`subscreen_display_time`) and is unlimited while "Stay awake" keeps a charging phone on.*
+*Implemented in v3 (October 2026): everything below except #5 and #12 (cut), with #3 folded into #4. One change found on the device: the rear's window is read from HyperOS (`subscreen_display_time`) and is unlimited while "Stay awake" keeps a charging phone on. And the double-tap below doesn't survive the device: HyperOS sleeps the awake rear on a double-tap, so replay is a tap on Today's count.*
 
 The instrument works. Tubes, fire and cats read at a glance, and idle stays at 0 fps. The problems come from the rear's 10-second awake window and from the panel usually facing away from you.
 **The always-on face can show wrong data.** After midnight it shows yesterday's count labelled TODAY, with the live lamp lit. Most merges celebrate at doze brightness with nobody watching, and almost every showcase runs past the dim and gets deleted.

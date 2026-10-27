@@ -57,7 +57,7 @@ Fix (`RearPokeActivity`):
 - **It sticks:** once registered, the slot survives locking and rear doze/wake. Verified with the phone locked, the rear dimmed then woken, and 7 swipes: 0 freezes, all delivered.
 - **Battery is unchanged:** while the rear is dim (not ON), the exemption doesn't apply, so Greeze still freezes Merged.
 
-Also: while the rear is dim, HyperOS swallows touches until a double-tap wakes it (`secure double_tap_to_wake=1`), and it dims 10 s after the last touch.
+Also: while the rear is dim, HyperOS swallows touches until a double-tap wakes it (`secure double_tap_to_wake=1`), a double-tap on the awake rear puts it to sleep (`goToSleep`, reason `sleep_button`, power group 1), and it dims 10 s after the last touch.
 
 ## Power
 

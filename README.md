@@ -32,12 +32,12 @@ Swipe left and right through eight views: Today, Recent, Streak, Week, All-time,
 ## Touch
 
 - **Swipe** for the next or previous view. **Tap** what's under your finger (a row, a badge, a count, a cat), or anywhere else for the next view.
-- **Double-tap Today** to replay the last merge.
+- **Tap the big count on Today** to replay the last merge. (Not a double-tap: on the rear, HyperOS keeps that for itself and turns the screen off.)
 - **Hold, then drag** and a cat flies out of the camera and chases your finger. Let go slowly and it flies home; fling it and it bursts into fireworks. On the cat screen it's a laser dot the cats chase.
 - **Hold still for 1.5 s** to open Setup on the front screen (GitHub sign-in, Shizuku, daily goal, quiet hours). The rear says so. The launcher icon's long-press menu has Setup too.
 - Each screen shows its gesture once, until you've used it. Every touch answers with a tick.
 
-The rear screen dims after its timeout: 10 s after it wakes or is last touched, by default (Merged reads the setting). Once it's dim, the first double-tap only wakes it. The full gesture grammar is in `design/UX-PASS.md`.
+The rear screen dims after its timeout: 10 s after it wakes or is last touched, by default (Merged reads the setting). Once it's dim, a double-tap wakes it; on an awake rear, a double-tap turns it off. That's HyperOS, so Merged has no double-tap gestures. The full gesture grammar is in `design/UX-PASS.md`.
 
 ## How it runs on the rear screen
 

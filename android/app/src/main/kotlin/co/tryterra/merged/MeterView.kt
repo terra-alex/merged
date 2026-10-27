@@ -1404,7 +1404,8 @@ class MeterView(ctx: Context) : View(ctx) {
     }
 
     // --------------------------------------------------------------- touch (UX-PASS §4)
-    // Only reaches us while the rear is awake: once it dims, HyperOS swallows touches until a double-tap wakes it.
+    // Only reaches us while the rear is awake: once it dims, HyperOS swallows touches until a double-tap wakes it
+    // (and a double-tap on the awake rear sleeps it, so Merged has no double-tap gestures).
     //
     // Layers, first match wins: a merge moment (tap a flying cat: pop; swipe: settle and move), a show (tap: Today;
     // swipe: move on), a card (tap: close), signed out / token expired (tap: Setup), then the screen's own map.
@@ -1422,8 +1423,6 @@ class MeterView(ctx: Context) : View(ctx) {
     private var lastSY = 0f
     private var popped = false
     private var longFired = false
-    private var lastTapAt = -1000L
-    private var secondTap = false // this touch came down within 300 ms of a tap on Today: it's a double-tap
     private var vt: VelocityTracker? = null
     private var rubCat = -1   // the colony cat under the finger at touchdown
     private var rubDir = 0
@@ -1431,10 +1430,6 @@ class MeterView(ctx: Context) : View(ctx) {
     private var rubPath = 0f
     private var rubAt = 0L
     private var purring = false
-    private val singleTap = Runnable {
-        val now = SystemClock.uptimeMillis()
-        if (screen == Screen.TODAY && !inMoment(now) && !inShow(now)) nextScreen(+1, now)
-    }
     private val longPress = Runnable {
         val now = SystemClock.uptimeMillis()
         if (mode == Mode.TAP && !inMoment(now) && !inShow(now) && !cardOpen()) { longFired = true; openSetup(now) }
@@ -1458,8 +1453,6 @@ class MeterView(ctx: Context) : View(ctx) {
             MotionEvent.ACTION_DOWN -> {
                 touchAt = now; downAt = now; downX = e.x; downY = e.y; lastSX = sx; lastSY = sy
                 mode = Mode.TAP; longFired = false; popped = false
-                secondTap = screen == Screen.TODAY && now - lastTapAt < 300
-                if (secondTap) removeCallbacks(singleTap) // whatever this touch turns out to be, the first tap doesn't navigate
                 vt?.recycle(); vt = VelocityTracker.obtain().also { it.addMovement(e) }
                 postDelayed(longPress, LONG_MS)
                 if (inMoment(now) && fx?.pop(sx, sy, now) == true) { // a flying cat, hit: it bursts right there
@@ -1540,14 +1533,16 @@ class MeterView(ctx: Context) : View(ctx) {
         }
     }
 
-    /** Today waits 300 ms for a second tap (double-tap: replay); a tap on the peeking cat replays at once. */
+    /**
+     * Tap the count (the hero tubes): replay the last merge. Not a double-tap: on the rear, HyperOS keeps that for
+     * itself (it sleeps an awake rear and wakes a dim one). The peeking cat replays too; anywhere else, the next screen.
+     */
     private fun tapToday(sx: Float, sy: Float, now: Long) {
         if (now < peekUntil && sx < 160f && sy > 400f) {
-            removeCallbacks(singleTap); fx?.unpeek(); peekUntil = 0; noteUntil = 0
+            fx?.unpeek(); peekUntil = 0; noteUntil = 0
             tick(); replay(now, news = true); return
         }
-        if (secondTap) { lastTapAt = -1000L; learn("replay"); replay(now) }
-        else { lastTapAt = now; postDelayed(singleTap, 300) }
+        if (sx < 360f && sy < 490f) { learn("tapReplay"); tick(); replay(now) } else nextScreen(+1, now)
     }
 
     /** Setup opens on the front screen (often face down): say so on the rear. */
@@ -1611,7 +1606,7 @@ class MeterView(ctx: Context) : View(ctx) {
     }
 
     override fun onDetachedFromWindow() {
-        removeCallbacks(warm); removeCallbacks(ambient); removeCallbacks(kick); removeCallbacks(singleTap); removeCallbacks(longPress)
+        removeCallbacks(warm); removeCallbacks(ambient); removeCallbacks(kick); removeCallbacks(longPress)
         removeCallbacks(purrPause)
         vt?.recycle(); vt = null
         feel.release()
@@ -1776,7 +1771,12 @@ class MeterView(ctx: Context) : View(ctx) {
         drawSign(c, art.sign(Gas.ARGON, false), 382f, 249f, dels[4].lvl * gB, min(sOd, odCap))
         drawLabel(c, linesLabel, 404f, 28f, now, dim)
         drawLabel(c, weekLabel, 404f, 336f, now, dim)
-        if (noteOn(now)) drawText(c, note, true, 26f, 508f, dim, 548f) else drawLabel(c, heroLabel, 26f, 508f, now, dim, right = 548f)
+        val hint = !learned("tapReplay") && hinting(now) && !heroLabel.active(now) && heroLabel.text == heroLabelText(shown)
+        when {
+            noteOn(now) -> drawText(c, note, true, 26f, 508f, dim, 548f)
+            hint -> drawText(c, "PRs MERGED · TAP TO REPLAY", false, 26f, 508f, dim, 548f)
+            else -> drawLabel(c, heroLabel, 26f, 508f, now, dim, right = 548f)
+        }
         snap?.takeIf { shown != null }?.let { // as of the last fetch: only changes when a poll lands (0 extra frames)
             val at = Instant.ofEpochMilli(it.fetchedAtMs).atZone(ZoneId.systemDefault())
             stampPaint.alpha = (255 * max(dim, .6f)).toInt()

@@ -256,7 +256,7 @@ class SetupActivity : Activity() {
         /** The gesture grammar (UX-PASS §4), in the words the rear's hints use. */
         val LEGEND = """
             Swipe left or right: the next screen. Tap: the next screen, or whatever you tap (a row, a badge, a count).
-            Double-tap Today: replay the last merge. Tap a flying cat during a merge: pop it.
+            Tap the big count on Today: replay the last merge. Tap a flying cat during a merge: pop it.
             Hold, then drag: a pet cat follows your finger (fling it: fireworks). On the cat screen: a laser dot.
             Cats: tap one to meet its PR (again for the details), rub one back and forth, tap the header to wake them.
             Hold still for 1.5 s: this screen.
