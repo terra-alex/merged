@@ -1,0 +1,75 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Flashover</title>
+<style>html,body{margin:0;background:#000;overflow:hidden}canvas{display:block}pre{color:#fff;font:12px monospace;position:absolute;top:0;left:0;margin:4px}</style>
+<canvas id="c" width="976" height="596"></canvas>
+<pre id="out"></pre>
+<script src="bg.js"></script>
+<script src="fx.js"></script>
+<script>
+// ?t=<ms>&tier=<S|M|L|XL>[&night=1] draws exactly that instant; ?play=1 loops; ?stats=1 prints peak draws per tier.
+const q = new URLSearchParams(location.search);
+const tier = q.get('tier') || 'M', night = q.get('night') === '1';
+const c = document.getElementById('c'), ctx = c.getContext('2d');
+const load = (src) => new Promise((r) => { const i = new Image(); i.onload = () => r(i); i.src = src; });
+
+// Per lit digit, sampled from the backdrop (on Android: once per glyph bitmap at bake time).
+function sampleInk(img) {
+  const g = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+  g.canvas.width = 976; g.canvas.height = 596; g.drawImage(img, 0, 0);
+  const px = g.getImageData(0, 0, 976, 596).data;
+  const luma = (x, y) => { const i = (y * 976 + x) * 4; return 0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2]; };
+  // ink: edge points (flamelet spawns; top edges weigh double). anchors: well-spaced top-edge points (flame tongues).
+  const pts = (x0, y0, w, h, minD, maxN) => {
+    const ink = [], top = [], seen = new Set();
+    for (let y = y0 + 3; y < y0 + h - 3; y++) for (let x = x0 + 3; x < x0 + w - 3; x++) {
+      if (luma(x + 296, y) < 205) continue;
+      const up = luma(x + 296, y - 3) < 180, side = luma(x + 293, y) < 180 || luma(x + 299, y) < 180;
+      if (!up && !side) continue;
+      const key = ((x / 4) | 0) + ':' + ((y / 4) | 0);
+      if (seen.has(key)) continue;
+      seen.add(key); ink.push([x, y]); if (up) { ink.push([x, y]); top.push([x, y]); }
+    }
+    if (!ink.length) return null;
+    const anchors = [];
+    for (const p of top.sort((a, b) => a[1] - b[1]))
+      if (anchors.length < maxN && anchors.every((q) => Math.hypot(q[0] - p[0], q[1] - p[1]) >= minD)) anchors.push(p);
+    return { ink: ink.sort((a, b) => a[1] - b[1]), anchors: anchors.sort((a, b) => a[0] - b[0]) };
+  };
+  return {
+    hero: FX.HERO.map((T) => pts(T.x, T.y, T.w, T.h, 18, 8)),
+    adds: FX.BX.map((x) => pts(x, FX.ADDS_Y, FX.BW, FX.BH, 10, 3)),
+    dels: FX.BX.map((x) => pts(x, FX.DELS_Y, FX.BW, FX.BH, 10, 3)),
+  };
+}
+
+Promise.all([load(BG.big), load(BG.moment)]).then(([big, moment]) => {
+  const ink = sampleInk(moment);
+  function frame(t, tr = tier) {
+    ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+    ctx.drawImage(t < 300 ? big : moment, 0, 0); // stand-in for the live instrument
+    if (tr !== 'S' && !night && t < 90) { // existing relay strike (gB 0.35)
+      ctx.fillStyle = `rgba(0,0,0,${t < 60 ? 0.65 : 0.65 * (1 - (t - 60) / 30)})`; ctx.fillRect(296, 0, 680, 596);
+    }
+    ctx.save();
+    ctx.beginPath(); ctx.roundRect(296, 0, 680, 596, [0, 101, 101, 0]); ctx.clip(); // the island and corners hide the rest
+    ctx.translate(296, 0);
+    const n = FX.draw(ctx, t, tr, night, ink);
+    ctx.restore();
+    return n;
+  }
+  if (q.get('stats') === '1') {
+    const lines = [];
+    for (const tr of ['S', 'M', 'L', 'XL']) {
+      let max = 0, at = 0, last = 0;
+      for (let t = 0; t <= FX.DUR[tr] + 1500; t += 4) { const n = frame(t, tr); if (n > max) { max = n; at = t; } if (n) last = t; }
+      lines.push(`${tr}: peak ${max} draws @ ${at} ms, last FX frame ${last} ms (budget ${FX.DUR[tr]})`);
+    }
+    document.getElementById('out').textContent = lines.join('\n');
+  } else if (q.get('play') === '1') {
+    const t0 = performance.now(), loop = FX.DUR[tier] + 900;
+    const tick = (now) => { frame((now - t0) % loop); requestAnimationFrame(tick); };
+    requestAnimationFrame(tick);
+  } else frame(+q.get('t') || 0);
+});
+</script>

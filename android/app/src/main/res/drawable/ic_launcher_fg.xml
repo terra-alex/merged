@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A single Nixie tube showing a glowing zero. 108dp adaptive canvas, safe zone 21..87. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:strokeColor="#33FFFFFF" android:strokeWidth="1.6"
+        android:pathData="M37,82 L37,42 A17,17 0 0 1 71,42 L71,82 Z"/>
+    <path android:strokeColor="#55FF5200" android:strokeWidth="9" android:strokeLineCap="round"
+        android:pathData="M54,46 C61,46 63,52 63,61 C63,70 61,76 54,76 C47,76 45,70 45,61 C45,52 47,46 54,46 Z"/>
+    <path android:strokeColor="#FFFFD9B0" android:strokeWidth="3.2" android:strokeLineCap="round"
+        android:pathData="M54,46 C61,46 63,52 63,61 C63,70 61,76 54,76 C47,76 45,70 45,61 C45,52 47,46 54,46 Z"/>
+</vector>

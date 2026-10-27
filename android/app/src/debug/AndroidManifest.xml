@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug builds only. DUMP is held by adb's shell uid, not by third-party apps,
+     so only `adb shell am broadcast` can drive this receiver. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <receiver
+            android:name=".DebugReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP">
+            <intent-filter>
+                <action android:name="co.tryterra.merged.DEBUG"/>
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

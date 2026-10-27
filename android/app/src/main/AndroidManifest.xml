@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- DRAW_WAKE_LOCK pushes: get a fresh frame onto the dozing rear panel. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    <!-- Buzz on merge. -->
+    <uses-permission android:name="android.permission.VIBRATE"/>
+
+    <application
+        android:label="Merged"
+        android:icon="@mipmap/ic_launcher"
+        android:allowBackup="false"
+        android:theme="@android:style/Theme.Material.NoActionBar">
+
+        <!-- Shizuku discovery provider — lets Shizuku list + authorize us. -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:multiprocess="false"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL"/>
+
+        <activity
+            android:name=".MeterActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+            android:resizeableActivity="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+
+        <!-- Own task (empty affinity) so long-pressing the rear meter opens Setup on
+             the front screen instead of stacking it in the meter's rear-display task.
+             configChanges keeps the device-flow poller alive across rotation/theme. -->
+        <activity
+            android:name=".RearPokeActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <!-- HyperOS: allowed to start on the rear display (ActivityStarterImpl, unlocked only). -->
+            <meta-data android:name="miui.rear.policy" android:value="1" />
+        </activity>
+        <activity
+            android:name=".SetupActivity"
+            android:exported="false"
+            android:label="Merged setup"
+            android:taskAffinity=""
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|uiMode|density|keyboardHidden"/>
+    </application>
+</manifest>
