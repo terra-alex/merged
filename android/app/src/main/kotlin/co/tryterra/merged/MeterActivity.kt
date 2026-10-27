@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.hardware.display.DisplayManager
 import android.os.Bundle
+import android.os.Parcel
 import android.os.PowerManager
 import android.os.Handler
 import android.os.Looper
@@ -80,6 +81,7 @@ class MeterActivity : Activity() {
         window.attributes = window.attributes.apply {
             layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
         }
+        keepDoubleTap()
         view = MeterView(this)
         // DRAW_WAKE_LOCK (0x80, @hide constant, WAKE_LOCK permission only): lifts a
         // dozing display from DOZE_SUSPEND to DOZE so one frame can land.
@@ -354,6 +356,31 @@ class MeterActivity : Activity() {
         main.postDelayed({ if (!isDestroyed) view.invalidate() }, 50)
     }
 
+    /**
+     * HyperOS turns the rear off on any double-tap (MiuiSubscreenDoubleTapGesture) unless the focused window sets
+     * MIUI_FLAG_DISABLE_SUBSCREEN_DOUBLE_TAP, and Merged's double-tap is replay. LayoutParams.miuiFlags is a blocked
+     * hidden API, but the params' parcel carries it: width, height, x, y, type, flags, extraFlags, miuiFlags,
+     * miuiAlwaysDisplayInCutout, privateFlags, softInputMode, layoutInDisplayCutoutMode, … (HyperOS 3, Android 16).
+     * Any other layout (stock Android, a future ROM) fails the check and is left alone.
+     */
+    private fun keepDoubleTap() {
+        val a = window.attributes
+        val p = Parcel.obtain()
+        try {
+            a.writeToParcel(p, 0)
+            p.setDataPosition(0)
+            val i = IntArray(12) { p.readInt() }
+            if (i.take(6) != listOf(a.width, a.height, a.x, a.y, a.type, a.flags) ||
+                i[10] != a.softInputMode || i[11] != a.layoutInDisplayCutoutMode) return
+            p.setDataPosition(7 * 4)
+            p.writeInt(i[7] or MIUI_FLAG_DISABLE_SUBSCREEN_DOUBLE_TAP)
+            p.setDataPosition(0)
+            window.attributes = WindowManager.LayoutParams(p)
+        } finally {
+            p.recycle()
+        }
+    }
+
     /** Slowest refresh mode at the current resolution when idle; ~60Hz while animating. */
     private fun setRefreshRate(fast: Boolean) {
         val d = display ?: return
@@ -376,6 +403,7 @@ class MeterActivity : Activity() {
         private const val OPEN_MS = 5 * 60_000L
         const val WINDOW_DAYS = 7L
         private const val DRAW_WAKE_LOCK = 0x80 // PowerManager.DRAW_WAKE_LOCK (@hide)
+        private const val MIUI_FLAG_DISABLE_SUBSCREEN_DOUBLE_TAP = 256 // WindowManager.LayoutParams (HyperOS)
 
         /** Set while a meter is resumed: re-fetch now (Setup after sign-in, DebugReceiver). */
         @Volatile var poke: (() -> Unit)? = null

@@ -57,7 +57,9 @@ Fix (`RearPokeActivity`):
 - **It sticks:** once registered, the slot survives locking and rear doze/wake. Verified with the phone locked, the rear dimmed then woken, and 7 swipes: 0 freezes, all delivered.
 - **Battery is unchanged:** while the rear is dim (not ON), the exemption doesn't apply, so Greeze still freezes Merged.
 
-Also: while the rear is dim, HyperOS swallows touches until a double-tap wakes it (`secure double_tap_to_wake=1`), a double-tap on the awake rear puts it to sleep (`goToSleep`, reason `sleep_button`, power group 1), and it dims 10 s after the last touch.
+Also: while the rear is dim, HyperOS swallows touches until a double-tap wakes it (`secure double_tap_to_wake=1`), and it dims 10 s after the last touch.
+
+On an awake rear, any two taps within 400 ms and 100 px put it to sleep: `MiuiSubscreenDoubleTapGesture` in `miui-services.jar` calls `goToSleep` (reason `sleep_button`, power group 1). It stands down for a few system packages, or when the focused window has `WindowManager.LayoutParams.miuiFlags & MIUI_FLAG_DISABLE_SUBSCREEN_DOUBLE_TAP` (256). The field is a blocked hidden API, but `LayoutParams.writeToParcel` writes it as the 8th int (after width, height, x, y, type, flags, extraFlags) and `LayoutParams(Parcel)` is public, so `MeterActivity.keepDoubleTap()` sets the bit in the parcel and reads the params back, after checking the layout around it. Look for `flag disable double tap gesture` in logcat.
 
 ## Power
 
