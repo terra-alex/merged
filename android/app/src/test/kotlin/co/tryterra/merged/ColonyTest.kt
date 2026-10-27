@@ -64,4 +64,22 @@ class ColonyTest {
         assertTrue(MergeFx.pile(prs(60)).count { it.zzz } in 8..36)
         assertTrue(MergeFx.pile(prs(60)).map { it.variant }.toSet().all { it in 0..3 })
     }
+
+    @Test fun shelfLeavesRoom() { // with READY kittens on the shelf the pile stays below y 116
+        for (n in listOf(5, 30, 60)) assertTrue(MergeFx.pile(prs(n), top = 116f).all { box(it)[1] >= 116f })
+    }
+
+    @Test fun coats() {
+        val ps = prs(10)
+        val rank = MergeFx.rank(ps + prs(2)) // terra/api and terra/app lead with 3 each, then docs
+        assertEquals(mapOf("terra/api" to 0, "terra/app" to 1, "terra/docs" to 2), rank)
+        val oct = java.time.LocalDate.of(2026, 10, 20)
+        assertEquals(3, MergeFx.coat(ps[3], rank, oct)) // infra: not in the top 3
+        assertEquals(MergeFx.PUMPKIN, MergeFx.coat(ps[3], rank, java.time.LocalDate.of(2026, 10, 27))) // Halloween week
+        val many = List(4000) { Pr("id$it", "o/r", it, "t", 1, 1, 0L) }
+        val gold = many.count { MergeFx.coat(it, emptyMap(), oct) == MergeFx.GOLD }
+        val ghosts = many.count { MergeFx.ghost(it) }
+        assertTrue("gold $gold", gold in 2..25); assertTrue("ghosts $ghosts", ghosts in 2..25)
+        assertTrue(MergeFx.pile(ps).all { it.pr != null })
+    }
 }

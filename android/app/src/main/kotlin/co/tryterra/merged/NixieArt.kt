@@ -90,6 +90,7 @@ class NixieArt(assets: AssetManager) {
         for (cls in listOf(Cls.LIFE, Cls.LIFE5, Cls.RAIL)) { // LIFE5: 100+ weeks on Week, 10,000+ all-time
             glass(cls, Gas.NEON); glyph(cls, Gas.NEON, ',')
             for (c in '0'..'9') glyph(cls, Gas.NEON, c)
+            if (cls == Cls.RAIL) { glyph(cls, Gas.NEON, 'k'); glyph(cls, Gas.NEON, 'M') } // ALL-TIME's biggest-PR record
         }
     }
 

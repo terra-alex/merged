@@ -21,9 +21,14 @@ class Vault(context: Context) {
         get() = prefs.getString(KEY, null)?.let { runCatching { decrypt(it) }.getOrNull() }
         set(value) {
             val e = prefs.edit()
-            if (value.isNullOrBlank()) e.remove(KEY) else e.putString(KEY, encrypt(value.trim()))
+            if (value.isNullOrBlank()) e.remove(KEY) else e.putString(KEY, encrypt(value.trim())).remove(EXPIRED)
             e.apply()
         }
+
+    /** GitHub rejected the token (401): the meter keeps the last numbers, cooled, under TOKEN EXPIRED. A new token clears it. */
+    var expired: Boolean
+        get() = prefs.getBoolean(EXPIRED, false)
+        set(v) { prefs.edit().putBoolean(EXPIRED, v).apply() }
 
     private fun key(): SecretKey {
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
@@ -53,6 +58,7 @@ class Vault(context: Context) {
 
     private companion object {
         const val KEY = "github_token"
+        const val EXPIRED = "expired"
         const val ALIAS = "merged_vault"
         const val TRANSFORM = "AES/GCM/NoPadding"
         const val IV_LEN = 12

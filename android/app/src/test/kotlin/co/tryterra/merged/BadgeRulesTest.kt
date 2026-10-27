@@ -75,4 +75,20 @@ class BadgeRulesTest {
         val late = Pr("x", "o/r", 1, "t", 0, 30, LocalDateTime.parse("2026-10-27T02:30").atZone(ZoneId.of("UTC")).toInstant().toEpochMilli(), genChecked = true)
         assertEquals(listOf("NET_NEGATIVE:2026-10-26", "GOAL:2026-10-26"), keys(listOf(pr("2026-10-26T12:00", 20, 0), late), goal = 2))
     }
+
+    @Test fun progressLines() {
+        val now = LocalDateTime.parse("2026-10-30T14:00") // Friday afternoon
+        val todays = listOf(pr("2026-10-30T10:00", 3000, 1210), pr("2026-10-30T11:00", openSec = 120))
+        fun prog(b: Badge, streak: Int = 3, rolled: Boolean = false, life: Int = 563) =
+            BadgeBook.progress(b, todays, todays, 10, streak, rolled, life, now)
+        assertEquals("TODAY 2 / 10" to "2/10", prog(Badge.GOAL))
+        assertEquals("TODAY 4,225 / 10,000 LINES" to "4.2K/10K", prog(Badge.TEN_K))
+        assertEquals("STREAK 3 / 5" to "3/5", prog(Badge.ON_A_ROLL))
+        assertEquals("EARNED THIS RUN" to null, prog(Badge.ON_A_ROLL, streak = 7, rolled = true))
+        assertEquals("37 PRs TO #600" to "37 TO GO", prog(Badge.CENTURY))
+        assertEquals("1 PR TO #600", prog(Badge.CENTURY, life = 599).first)
+        assertEquals("NEXT CHANCE · FRI FROM 5 PM", prog(Badge.FRIDAY).first)
+        assertEquals("FASTEST THIS WEEK · 2 MIN", prog(Badge.SPEEDRUN).first)
+        assertEquals("NEXT CHANCE · TOMORROW 5 AM", prog(Badge.EARLY_BIRD).first)
+    }
 }

@@ -49,11 +49,16 @@ data class OpenPr(
     val base: String = "",
 ) {
     enum class Light { GREEN, RED, AMBER, OFF }
-    enum class Status(val text: String, val light: Light) {
-        READY("READY TO MERGE", Light.GREEN), FAILING("CHECKS FAILED", Light.RED),
-        CONFLICT("MERGE CONFLICT", Light.RED), CHANGES("CHANGES REQUESTED", Light.RED),
-        RUNNING("CHECKS RUNNING", Light.AMBER), WAITING("WAITING ON REVIEW", Light.AMBER), DRAFT("DRAFT", Light.OFF),
+    /** [word]: the row's first word on OPEN (status first, so ellipsizing never eats it). */
+    enum class Status(val text: String, val word: String, val light: Light) {
+        READY("READY TO MERGE", "READY", Light.GREEN), FAILING("CHECKS FAILED", "FAILING", Light.RED),
+        CONFLICT("MERGE CONFLICT", "CONFLICT", Light.RED), CHANGES("CHANGES REQUESTED", "CHANGES", Light.RED),
+        RUNNING("CHECKS RUNNING", "RUNNING", Light.AMBER), WAITING("WAITING ON REVIEW", "WAITING", Light.AMBER),
+        DRAFT("DRAFT", "DRAFT", Light.OFF),
     }
+
+    /** Checks had failed (the rescue watch list, UX-PASS #19). */
+    val failing: Boolean get() = checks == "FAILURE" || checks == "ERROR"
 
     val status: Status get() = when {
         draft -> Status.DRAFT

@@ -314,16 +314,19 @@ Not persisted: the current view (always opens on Today), drift phase and sweep t
 - Scope `repo` (device flow) so private-repo PRs count. Fallback: paste a classic PAT (`repo`, `read:org`) in Setup, for orgs that restrict OAuth apps. For local testing, use `gh auth token` via the debug receiver.
 
 ## 14. Input
-Views, in swipe order: **Today → All-time → Recent → Streak → Week → Badges → Cats → Open** (v2 screens: `V2.md`). Open is last, so it's one swipe right of Today.
-- **Tap**: next view, except where the view uses taps (below). **Swipe ←/→** (> 90 px, mostly horizontal, finished within ~350 ms): next / previous view. Anything but Today auto-returns after 20 s, and the doze face is always Today.
-- **Recent** (added after v1): the last 5 merged PRs, newest first, as rows of `3H AGO · REPO` + title. The highlighted row advances every 2.6 s and the two banks roll to that PR's +/−.
-- **Tap a Recent row**: a detail card for that PR replaces the list (auto-advance stops): `OWNER/REPO · #N`, the full title (up to 3 lines), then `MERGED TODAY 15:34 · 1H AGO`, `OPEN 9M BEFORE MERGE`, `6 FILES · 2 COMMITS`, `2 REVIEWS · 3 COMMENTS`, `branch → base`, and `IGNORED 2 GENERATED FILES · 12,034 LINES` when that applies; `SIZE · M` under the banks. Tap again to go back to the list. Each tap re-arms the 20 s return to Today. The extra fields (`createdAt changedFiles headRefName baseRefName commits/reviews/comments{totalCount}`) come from the same GraphQL search (still cost 1).
-- **Tap an Open row**: the same kind of card for an open PR (status, opened/updated, review, checks, auto-merge, conflict, branch).
-- **Tap a badge**: its card (name, rule, times earned, first/last). **Tap on Cats**: the newest 16 cats wake, fly round and go back to sleep. **Tap on Week**: replay the recap.
-- **Double-tap**: replay the most recent merge's moment (cats + fire). Today rewinds to the totals just before it, then plays it again.
-- **Drag** (finger still down after 350 ms and moving): a cat flies out of the camera island and chases the finger (exponential follow, τ 70 ms), with its rainbow and burning butt. On release it carries the finger's velocity (min 700 px/s, max 2400) with drag τ 0.5 s, and bursts into mini cats after 0.7 s or at the stage edge. See `FX.md`.
-- **Long-press** (800 ms, finger still): opens Setup (existing), which also sets the daily goal.
-- Gestures are ignored while a merge moment or a showcase (goal surge, badge unlock, open-PR alert, recap) plays.
+Superseded in detail by `UX-PASS.md` §3–§4 (screens, gesture grammar), which this summarises.
+
+Views, in swipe order: **Today → Recent → Streak → Week → All-time → Badges → Cats → Open** (v2 screens: `V2.md`). Open is last, so it's one swipe right of Today. Pips at (30 + 14·i, 568) show where you are, except on Today. When the rear leaves STATE_ON it goes home: the doze face is always Today.
+- **Layers**, first match wins: a merge moment (tap a flying cat within 90 px: it pops; elsewhere the lamp blinks; a swipe settles the numbers and moves), a show (tap: Today; swipe: move on), a card (tap: close), signed out / token expired (any tap: Setup), then the screen's own map.
+- **A pause decides.** Moving within 250 ms of touchdown is judged at UP: one-way with |dx| > 90 and |dx| > 1.5|dy| is a swipe, however slow. Resting ≥ 250 ms, then moving, is a hold-drag. Still for 1.5 s is Setup. No movement is a tap.
+- **Tap** acts on what's under it, at UP, with no wait (only Today waits 300 ms, for its double-tap). With no target it goes to the next view; on Cats it wakes the newest.
+- **Recent**: the last 5 merged PRs, newest first, as rows of `3H AGO · REPO` + title. The highlighted row advances every 2.6 s and the two banks roll to that PR's +/−. **Tap a row**: a detail card (`OWNER/REPO · #N`, the full title, then `MERGED TODAY 15:34 · 1H AGO`, `OPEN 9M BEFORE MERGE`, `6 FILES · 2 COMMITS`, `2 REVIEWS · 3 COMMENTS`, `branch → base`, `IGNORED 2 GENERATED FILES · 12,034 LINES`); `SIZE · M` under the banks. Tap to close.
+- **Open**: tap a row for its card; tap a count band (x > 392) to list just that colour, again for the next 5, past the end for all; the header strip goes next.
+- **Badges**: tap one for its card (name, rule, how close, times earned, first/last).
+- **Cats**: tap a cat (nearest within 60 px) to poke it (it hops and sits up, its tag `API · #482 · +46 −55 · 2H AGO` fills the header for 4 s), again for its card; tap the header strip to wake the newest 6; moving at once and reversing within 70 px of a cat is a rub (hearts, a purr); hold, then drag: a laser dot the newest 3 chase.
+- **Double-tap Today**: replay the most recent merge's moment. Today rewinds to the totals just before it, then plays it again.
+- **Hold, then drag** (not Cats, not in quiet hours): a cat flies out of the camera island and chases the finger (exponential follow, τ 70 ms), with its rainbow and burning butt. Released slower than 700 px/s it flies home under the island; faster, it carries the finger's velocity (max 2400) with drag τ 0.5 s, and bursts into mini cats after 0.7 s or at the stage edge. See `FX.md`.
+- **Hold still for 1.5 s**: Setup on the front screen (`SETUP · ON YOUR PHONE` on the rear, or `UNLOCK YOUR PHONE FOR SETUP`), which also sets the daily goal and quiet hours. Also in the launcher icon's shortcuts.
 
 ## 15. Test hooks and acceptance
 Debug receiver (existing): `--es demo big|quiet|zero|off` should render to match `big.png` / `quiet.png` / `zero.png`. `--ei merge 1200` triggers an L-tier moment, `--ei merge 50` an S tier and `--ei merge 6000` an XL tier.

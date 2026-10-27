@@ -2,6 +2,8 @@
 
 merge_small.wav: S/M merges — two quick rising chiptune notes with a soft tail.
 merge_big.wav:   L/XL merges — a sparkly C-major arpeggio, then a little synth "mew".
+mew.wav:         a poked cat / the flyby launch — the same "mew" alone (MeterView plays it faster for small PRs).
+sparkle.wav:     a badge unlock — a short sparkle shimmer over a soft C7.
 
 Run: python3 design/sfx/make_sfx.py (stdlib only).
 """
@@ -85,4 +87,13 @@ for k, f in enumerate((1046.5, 1318.5, 1568.0, 2093.0)):  # C6 E6 G6 C7
 sparkle(big, 0.2, 6, 0.14, 2)
 mew(big, 0.52, 0.85)
 write('merge_big.wav', big)
+
+solo = [0.0] * int(0.38 * RATE)
+mew(solo, 0.0, 0.85)
+write('mew.wav', solo)
+
+sting = [0.0] * int(0.6 * RATE)
+note(sting, 0.0, 2093.0, 0.42, 0.5, vib=0.006)  # C7
+sparkle(sting, 0.02, 7, 0.16, 3)
+write('sparkle.wav', sting)
 print('wrote', os.path.abspath(OUT))

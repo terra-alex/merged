@@ -149,10 +149,27 @@ class ProgressTest {
     @Test fun weekMidweekEmpty() {
         val w = Progress.week(emptyList(), d("10-28"), ZoneId.of("UTC"), 10)
         assertEquals(d("10-26"), w.start)
-        assertEquals(0, w.prs); assertEquals(0, w.goalDays); assertEquals(3, w.workdaysSoFar)
+        assertEquals(0, w.prs); assertEquals(0, w.goalDays); assertEquals(2, w.workdaysSoFar) // Wed not met yet: Mon, Tue
         assertNull(w.best)
         // A PR stamped after today (clock skew) is not this week's.
         val future = pr(1, 1, 1, at("2026-10-29T10:00", ZoneId.of("UTC")))
         assertEquals(0, Progress.week(listOf(future), d("10-28"), ZoneId.of("UTC"), 10).prs)
+    }
+
+    @Test fun quietHours() {
+        assertEquals(true, Progress.quiet(23, 7, 23)); assertEquals(true, Progress.quiet(23, 7, 3))
+        assertEquals(false, Progress.quiet(23, 7, 7)); assertEquals(false, Progress.quiet(23, 7, 22))
+        assertEquals(true, Progress.quiet(1, 6, 5)); assertEquals(false, Progress.quiet(1, 6, 6))
+        assertEquals(false, Progress.quiet(9, 9, 9)) // the same hour: never quiet
+    }
+
+    @Test fun records() {
+        val days = h("10-19" to 4, "10-20" to 9, "10-23" to 2, "10-26" to 3, "10-27" to 12)
+        assertEquals(9, Progress.bestDay(days, d("10-27"))) // today is still running
+        assertEquals(15, Progress.bestWeek(days))
+        assertArrayEquals(intArrayOf(4, 9, 0, 0, 2, 0, 0), Progress.lastWeek(days, d("10-27")))
+        assertEquals(0, Progress.bestDay(emptyMap(), d("10-27")))
+        val p = Pr("x", "o/r", 1, "t", 1, 1, 10 * 60_000L + 59_000, createdAtMs = 0)
+        assertEquals(10, Progress.minutes(p))
     }
 }

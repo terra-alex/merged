@@ -11,6 +11,8 @@ import android.graphics.PorterDuffXfermode
 import android.graphics.RadialGradient
 import android.graphics.RectF
 import android.graphics.Shader
+import java.time.LocalDate
+import java.time.Month
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.atan2
@@ -21,20 +23,25 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.sin
+import kotlin.math.sqrt
 
 /**
- * Merge celebration drawn over the instrument (design: merged/design/FX.md).
+ * Merge celebration drawn over the instrument (design: merged/design/FX.md, merged/design/UX-PASS.md).
  *
  * 1. **Cats**: pixel pop-tart cats (own artwork, a Nyan Cat homage) burst out from under
- *    the camera island and zoom all over the stage, rainbow trails behind, butts on fire.
+ *    the camera island and zoom all over the stage, rainbow trails behind, butts on fire. The PR's
+ *    own cat (M and up) dives back under the island; the others burst like firework shells. A tap
+ *    pops one early ([pop]).
  * 2. **Flashover**: as the last cat leaves, the island strikes, a burner rail lights, the
  *    hero tubes fill with flame and the changed digits catch fire (XL: a wall of fire).
- * 3. **Colony** (the CATS screen): a static pile of sleeping cats, one per PR; on a tap the
- *    newest wake, fly round the stage the same way and land back on their spots.
+ * 3. **Colony** (the CATS screen): a static pile of sleeping cats, one per PR this week. New ones fly in
+ *    from under the island; a poked one hops and sits up; a rubbed one sends up hearts; the newest wake
+ *    and fly a lap, or chase a laser dot, and land back on their spots.
  *
- * Every element is a pure function of t (ms since its start) with hash-seeded randomness:
- * no per-frame state, and frames dropped while dozing need no catch-up. Fire is additive
- * light (ADD); the cats and rainbows are opaque. Stage px, inside MeterView's transform.
+ * Every element is a pure function of t (ms since its start) with hash-seeded randomness: no per-frame
+ * state, and frames dropped while dozing need no catch-up. The exceptions follow a finger (the pet cat,
+ * the laser chasers) and integrate per frame. Fire is additive light (ADD); the cats and rainbows are
+ * opaque. Stage px, inside MeterView's transform.
  */
 class MergeFx(private val art: NixieArt) {
 
@@ -55,56 +62,123 @@ class MergeFx(private val art: NixieArt) {
     private val digits = ArrayList<Digit>()
     private val cats = ArrayList<Cat>()
 
-    fun clear() { fireAt = NEVER; catsAt = NEVER; cats.clear(); wakeAt = NEVER }
+    /** Everything off (a moment cut short, the screen changed, the rear dozing). */
+    fun clear() {
+        fireAt = NEVER; catsAt = NEVER; cats.clear()
+        flyers.clear(); flyAt = NEVER; stirs.clear(); hearts.clear(); pokeIdx = -1; rubIdx = -1
+        laserOn = false; chasers.clear()
+        rockets.clear(); rocketAt = NEVER; peekAt = NEVER
+        petHeld = false; flingAt = NEVER
+    }
 
-    fun active(now: Long) = (now >= catsAt && now - catsAt < catsEnd) || petActive(now) || waking(now) ||
+    fun active(now: Long) = (now >= catsAt && now - catsAt < catsEnd) || petActive(now) || colonyActive(now) ||
+        (now >= rocketAt && now - rocketAt < ROCKET_MS + 700) || (now >= peekAt && now - peekAt < peekDur) ||
         (now >= fireAt && now - fireAt < if (night) 1000 else FIRE_END[tier])
 
     // ================================================================= cats
 
-    /** [v]: frosting variant. For a homecoming cat (boomX, boomY) is its spot. */
+    /**
+     * [v]: coat (see [coat]). [end]: what happens when its time is up — BURST like a firework shell, HOME onto its spot
+     * (boomX, boomY) with a puff, DIVE back under the camera island, or EXIT with a puff at (boomX, boomY). [calm]: a
+     * colony flight — rainbow only, half the trail, no fire. [idx]: its colony spot. [arrive]: the spot stays empty
+     * until it lands. [cut]: popped at this local time (ms); [gold]: the last pop of a clean sweep.
+     */
     private class Cat(val pts: FloatArray, val cum: FloatArray, val ts: Float, val dur: Float, val scale: Float, val seed: Int,
-                      var enterT: Float = -1f, var enterY: Float = 0f, var boomX: Float = 0f, var boomY: Float = 0f, val v: Int = 0)
+                      var enterT: Float = -1f, var enterY: Float = 0f, var boomX: Float = 0f, var boomY: Float = 0f, val v: Int = 0,
+                      val end: Int = BURST, val calm: Boolean = false, val idx: Int = -1, val arrive: Boolean = false) {
+        var cut = Float.NaN
+        var gold = false
+        var exitT = -1f
+        var exitY = 0f
+        fun endT() = if (cut.isNaN()) dur else cut
+        /** When it's gone from view (list time): a dive slips under the island at exitT, before its path ends off-stage. */
+        fun goneT() = if (end == DIVE && cut.isNaN() && exitT >= 0) exitT else ts + endT()
+    }
     private var catsEnd = 0L
 
-    /** Launch the cat flyby at [at]; returns how long until the fire should start. */
-    fun cats(at: Long, tier: Int): Long {
+    /**
+     * Launch the cat flyby at [at] in coat [v] (the PR's; the others vary); returns how long until the fire should
+     * start. Longer than [maxLead] and every cat speeds up to fit (no loop-the-loops when squeezed).
+     */
+    fun cats(at: Long, tier: Int, v: Int = 0, maxLead: Long = Long.MAX_VALUE): Long {
         val n = intArrayOf(1, 2, 3, 5)[tier]
         val roam = floatArrayOf(1800f, 2400f, 2800f, 3300f)[tier]
         val seed = (at % 100_000).toInt()
         catsAt = at
-        cats.clear()
-        var ts = 0f
-        for (i in 0 until n) {
-            val s = seed + 97 * i
-            val dur = roam * (.85f + .3f * rnd(s, 0, 5))
-            val cat = route(s, ts, dur, 1.2f + .4f * rnd(s, 0, 6), -120f, 80f + 440f * rnd(s, 0, 1))
-            var u = 0f // where it pops out of the camera edge
-            while (u < 1f) { catPos(cat, u); if (px >= 0f) { cat.enterT = cat.ts + u * cat.dur; cat.enterY = py; break }; u += .002f }
-            catPos(cat, 1f); cat.boomX = px; cat.boomY = py
-            cats += cat
-            ts += 180f + 120f * rnd(s, 0, 6)
+        var k = 1f
+        while (true) {
+            cats.clear()
+            var ts = 0f
+            for (i in 0 until n) {
+                val s = seed + 97 * i
+                val dur = k * roam * (.85f + .3f * rnd(s, 0, 5))
+                val cv = if (i == 0 || v == PUMPKIN) v else (v + i) % 4
+                val cat = route(s, ts, dur, 1.2f + .4f * rnd(s, 0, 6), -120f, 80f + 440f * rnd(s, 0, 1),
+                    v = cv, end = if (i == 0 && tier > S) DIVE else BURST, loops = k > .7f)
+                var u = 0f // where it pops out of the camera edge
+                while (u < 1f) { catPos(cat, u); if (px >= 0f) { cat.enterT = cat.ts + u * cat.dur; cat.enterY = py; break }; u += .002f }
+                if (cat.end == DIVE) { // and where it slips back under it
+                    u = 1f
+                    while (u > 0f) { catPos(cat, u); if (px >= 0f) { cat.exitT = cat.ts + u * cat.dur; cat.exitY = py; break }; u -= .002f }
+                } else { catPos(cat, 1f); cat.boomX = px; cat.boomY = py }
+                fly(cv, 0); fly(cv, 1) // bake here, not in onDraw
+                cats += cat
+                ts += k * (180f + 120f * rnd(s, 0, 6))
+            }
+            val lead = cats.maxOf { it.goneT().toLong() } + 250 // the island strikes as the last cat bursts or dives
+            if (lead <= maxLead || k < .25f) {
+                catsEnd = cats.maxOf { (it.ts + it.dur).toLong() } + 1600 // the last firework falls and fades
+                return lead
+            }
+            k *= min(.95f, (maxLead - 250f) / (lead - 250f))
         }
-        catsEnd = cats.maxOf { (it.ts + it.dur).toLong() } + 1600 // the last firework falls and fades
-        return cats.maxOf { (it.ts + it.dur).toLong() } + 250 // the island strikes as the last firework bursts
     }
 
     /**
-     * A random roam from (x0, y0) (the flyby: under the camera island), through a waypoint every ~⅓ s
-     * anywhere on the stage (sometimes a loop-the-loop), ending where it bursts like a firework shell —
-     * or, given a home (x1, y1), hopping up out of its spot first and dropping down onto the home last.
-     * Each leg gets a random share of the time, so cats surge and dawdle.
+     * A tap at (x, y) on a flyby cat (pose now or 50 ms ago, within 90 px) pops it: it bursts there and then. The last of a
+     * clean sweep (2+ cats, every one popped) goes off as a big gold shell. True if one popped.
      */
-    private fun route(s: Int, ts: Float, dur: Float, sc: Float, x0: Float, y0: Float,
-                      x1: Float = Float.NaN, y1: Float = 0f, v: Int = 0): Cat {
+    fun pop(x: Float, y: Float, now: Long): Boolean {
+        if (now < catsAt || now - catsAt >= catsEnd) return false
+        val t = (now - catsAt).toFloat()
+        var best: Cat? = null
+        var bd = 90f
+        for (c in cats) {
+            val lt = t - c.ts
+            if (lt < 0 || lt >= c.endT() || !c.cut.isNaN() || (c.enterT >= 0 && t < c.enterT) || (c.exitT >= 0 && t > c.exitT)) continue
+            for (back in floatArrayOf(0f, 50f)) {
+                pose(c, max(0f, lt - back))
+                val d = hypot(px - x, py - y)
+                if (d < bd) { bd = d; best = c }
+            }
+        }
+        val c = best ?: return false
+        c.cut = t - c.ts
+        pose(c, c.cut); c.boomX = px; c.boomY = py
+        if (cats.size >= 2 && cats.all { !it.cut.isNaN() }) { c.gold = true; fly(GOLD, 0); fly(GOLD, 1) } // bake here, not in onDraw
+        return true
+    }
+
+    /** When the island should strike (uptime): 250 ms after the last flyby cat bursts or dives — sooner once they're popped. */
+    fun strikeAt(): Long = catsAt + (cats.maxOfOrNull { it.goneT().toLong() } ?: 0L) + 250
+
+    /**
+     * A random roam from (x0, y0) (the flyby: under the camera island), through a waypoint every ~⅓ s
+     * anywhere on the stage (sometimes a loop-the-loop), ending where it bursts like a firework shell, diving
+     * back under the island — or, given a home (x1, y1), hopping up out of its spot first and dropping down onto
+     * the home last. Each leg gets a random share of the time, so cats surge and dawdle.
+     */
+    private fun route(s: Int, ts: Float, dur: Float, sc: Float, x0: Float, y0: Float, x1: Float = Float.NaN, y1: Float = 0f,
+                      v: Int = 0, end: Int = if (x1.isNaN()) BURST else HOME, calm: Boolean = false, idx: Int = -1,
+                      loops: Boolean = true, arrive: Boolean = false): Cat {
         val pts = ArrayList<Float>()
         fun pt(x: Float, y: Float) { pts += x; pts += y }
-        val home = !x1.isNaN()
+        val home = end == HOME
         pt(x0, y0)
         var x = x0; var y = y0
-        if (home) { y = max(40f, y0 - 60f - 30f * rnd(s, 0, 2)); pt(x, y) }
+        if (home && x0 >= 0f) { y = max(40f, y0 - 60f - 30f * rnd(s, 0, 2)); pt(x, y) }
         for (k in 1..(dur / 330).toInt()) {
-            if (k > 1 && rnd(s, k, 7) < .22f && x in 140f..540f && y in 150f..450f) {
+            if (loops && k > 1 && rnd(s, k, 7) < .22f && x in 140f..540f && y in 150f..450f) {
                 val r = 55f + 40f * rnd(s, k, 8)
                 val cw = if (rnd(s, k, 9) < .5f) 1f else -1f
                 for (m in 1..4) { // circle a centre above the last waypoint and come back through it
@@ -120,22 +194,30 @@ class MergeFx(private val art: NixieArt) {
             }
             pt(nx, ny); x = nx; y = ny
         }
-        if (home) { pt(x1, max(40f, y1 - 80f)); pt(x1, y1) }
-        else {
-            var bx = 0f; var by = 0f
-            for (tries in 0 until 6) { // burst point: well inside the stage, a long leg away
-                bx = 130f + 420f * rnd(s, 99, 3 + tries); by = 100f + 340f * rnd(s, 99, 13 + tries)
-                if (hypot(bx - x, by - y) > 170f) break
+        when (end) {
+            HOME -> { pt(x1, max(40f, y1 - 80f)); pt(x1, y1) }
+            DIVE -> pt(-170f, 80f + 440f * rnd(s, 99, 50))
+            else -> {
+                var bx = 0f; var by = 0f
+                for (tries in 0 until 6) { // burst point: well inside the stage, a long leg away
+                    bx = 130f + 420f * rnd(s, 99, 3 + tries); by = 100f + 340f * rnd(s, 99, 13 + tries)
+                    if (hypot(bx - x, by - y) > 170f) break
+                }
+                pt(bx, by)
             }
-            pt(bx, by)
         }
-        val p = pts.toFloatArray()
+        return cat(pts.toFloatArray(), s, ts, dur, sc, x1, y1, v, end, calm, idx, arrive, home)
+    }
+
+    /** A cat along waypoints [p]; each leg gets a random share of the time ([slow]: a gentle hop out and a slow settle). */
+    private fun cat(p: FloatArray, s: Int, ts: Float, dur: Float, sc: Float, x1: Float, y1: Float, v: Int, end: Int,
+                    calm: Boolean, idx: Int, arrive: Boolean, slow: Boolean): Cat {
         val legs = p.size / 2 - 1
         val cum = FloatArray(legs + 1)
         for (j in 0 until legs) cum[j + 1] = cum[j] + hypot(p[2 * j + 2] - p[2 * j], p[2 * j + 3] - p[2 * j + 1]) * (.6f + .9f * rnd(s, j, 11)) *
-            (if (home && (j == 0 || j == legs - 1)) 2.5f else 1f) // a gentle hop out and a slow settle
+            (if (slow && (j == 0 || j == legs - 1)) 2.5f else 1f)
         for (j in 1..legs) cum[j] /= cum[legs]
-        return Cat(p, cum, ts, dur, sc, s, boomX = x1, boomY = y1, v = v)
+        return Cat(p, cum, ts, dur, sc, s, boomX = x1, boomY = y1, v = v, end = end, calm = calm, idx = idx, arrive = arrive)
     }
 
     private var px = 0f
@@ -174,44 +256,62 @@ class MergeFx(private val art: NixieArt) {
         bx = px - dirX * back; by = py - dirY * back + 4f * c.scale
     }
 
-    /** [home]: colony cats, which land on their spot with a puff instead of bursting (and burn a little leaner: up to 16 fly). */
-    private fun drawCats(c: Canvas, list: ArrayList<Cat>, t: Float, home: Boolean) {
+    /** [alpha]: the screen's dim (colony flights); a ghost cat flies at .55 of it. */
+    private fun drawCats(c: Canvas, list: List<Cat>, t: Float, alpha: Float = 1f) {
         am = 1f; paint = overPaint
         for (q in 0 until list.size) {
             val cat = list[q]
             val lt = t - cat.ts
-            if (lt < 0 || lt > cat.dur + 1600) continue
+            val endT = cat.endT()
+            val fireT = cat.goneT() - cat.ts // a dive's fire goes out as it slips under the island
+            if (lt < 0 || lt > endT + 1600) continue
             trail(c, cat, lt)
             if (cat.enterT >= 0) { // burst out of the camera island
                 val d = t - cat.enterT
                 if (d >= -30 && d < 400) spr(c, aflare, 0f, cat.enterY, 160f, 160f, if (d < 0) (d + 30) / 30 else exp(-d / 120))
             }
-            // the butt on fire: puffs left hanging in the air behind it, burning drips, and the jet itself
+            if (cat.exitT >= 0 && cat.cut.isNaN()) { // …and back into it
+                val d = t - cat.exitT
+                if (d >= -30 && d < 400) spr(c, aflare, 0f, cat.exitY, 140f, 140f, if (d < 0) (d + 30) / 30 else exp(-d / 120))
+            }
             val s = cat.seed
-            flames(c, t, s + 1, cat.ts, cat.ts + cat.dur, if (home) 55f else 90f, 1f, .25f, .45f, 30f, 80f, 220f, 16f * cat.scale, 30f * cat.scale,
-                0f, 6f, 3f, .55f, firep, { 1f }) { _, r2, tb, _ -> pose(cat, tb - cat.ts); sx = bx; sy = by + (r2 - .5f) * 10f; svx = 0f }
-            val drips = (cat.dur / if (home) 90 else 50).toInt()
-            sparks(c, t, s + 2, drips, false, 40f, 140f, 60f, 220f, 900f, .8f, .35f, .7f, 1.6f, 26f,
-                { i, r -> cat.ts + (i + r) * cat.dur / drips }) { _, _, tb -> pose(cat, tb - cat.ts); sx = bx; sy = by }
-            if (lt > cat.dur) { if (home) puff(c, cat, t) else burst(c, cat, t); continue }
+            if (!cat.calm) { // the butt on fire: puffs left hanging in the air behind it, burning drips, and the jet itself
+                flames(c, t, s + 1, cat.ts, cat.ts + fireT, if (cat.end == HOME) 55f else 90f, 1f, .25f, .45f, 30f, 80f, 220f, 16f * cat.scale, 30f * cat.scale,
+                    0f, 6f, 3f, .55f, firep, { 1f }) { _, r2, tb, _ -> pose(cat, tb - cat.ts); sx = bx; sy = by + (r2 - .5f) * 10f; svx = 0f }
+                val drips = (fireT / if (cat.end == HOME) 90 else 50).toInt()
+                sparks(c, t, s + 2, drips, false, 40f, 140f, 60f, 220f, 900f, .8f, .35f, .7f, 1.6f, 26f,
+                    { i, r -> cat.ts + (i + r) * fireT / drips }) { _, _, tb -> pose(cat, tb - cat.ts); sx = bx; sy = by }
+            }
+            if (lt > endT) {
+                if (!cat.cut.isNaN() || cat.end == BURST) burst(c, cat, t)
+                else if (cat.end == HOME || cat.end == EXIT) puff(c, cat, t)
+                continue
+            }
             pose(cat, lt)
-            drawCat(c, px, py, dirX, dirY, cat.scale, t, s, lt, cat.v)
+            val ghost = colony.getOrNull(cat.idx)?.ghost == true
+            drawCat(c, px, py, dirX, dirY, cat.scale, t, s, lt, cat.v, !cat.calm && lt < fireT,
+                (255 * alpha.coerceIn(0f, 1f) * if (ghost) .55f else 1f).toInt())
         }
     }
 
-    /** One cat centred at (x, y) heading (dx, dy): the burning butt, then the cat facing where it's going. */
-    private fun drawCat(c: Canvas, x: Float, y: Float, dx: Float, dy: Float, sc: Float, t: Float, seed: Int, lt: Float, v: Int = 0) {
-        val bx = x - dx * 34f * sc; val by = y - dy * 34f * sc + 4f * sc
-        c.save(); c.translate(bx, by); c.rotate(Math.toDegrees(atan2(-dx, dy).toDouble()).toFloat()) // tongue (drawn up) points back
-        tongue(c, tongueN, 0f, 8f, 60f * sc, 150f * sc, .95f, t, seed * 0.37f, .7f)
-        tongue(c, tongueN, 0f, 6f, 28f * sc, 80f * sc, 1f, t, seed * 0.53f + 3f, .5f)
-        c.restore()
+    /** One cat centred at (x, y) heading (dx, dy): the burning butt ([fire]), then the cat facing where it's going. */
+    private fun drawCat(c: Canvas, x: Float, y: Float, dx: Float, dy: Float, sc: Float, t: Float, seed: Int, lt: Float, v: Int = 0,
+                        fire: Boolean = true, alpha: Int = 255) {
+        if (fire) {
+            val bx = x - dx * 34f * sc; val by = y - dy * 34f * sc + 4f * sc
+            c.save(); c.translate(bx, by); c.rotate(Math.toDegrees(atan2(-dx, dy).toDouble()).toFloat()) // tongue (drawn up) points back
+            tongue(c, tongueN, 0f, 8f, 60f * sc, 150f * sc, .95f, t, seed * 0.37f, .7f)
+            tongue(c, tongueN, 0f, 6f, 28f * sc, 80f * sc, 1f, t, seed * 0.53f + 3f, .5f)
+            c.restore()
+        }
         val face = if (dx >= 0) 1f else -1f
         val tilt = Math.toDegrees(atan2(dy, abs(dx)).toDouble()).toFloat().coerceIn(-60f, 60f)
         val frame = fly(v, if ((lt / 70).toInt() % 2 == 0) 0 else 1)
+        catPaint.alpha = alpha
         c.save(); c.translate(x, y); c.rotate(tilt * face); c.scale(face * sc, sc)
         c.drawBitmap(frame, -frame.width / 2f, -frame.height / 2f, catPaint)
         c.restore()
+        catPaint.alpha = 255
     }
 
     // ================================================================= pet cat (drag on the rear screen)
@@ -219,6 +319,7 @@ class MergeFx(private val art: NixieArt) {
     private var pet: Cat? = null
     private var petAt = NEVER
     private var petHeld = false
+    private var petHome = false
     private var petX = 0f
     private var petY = 0f
     private var petDX = 1f
@@ -236,35 +337,48 @@ class MergeFx(private val art: NixieArt) {
     private var histN = 0
     private var histAt = 0L
 
-    private fun petActive(now: Long) = petHeld || (flingAt != NEVER && now - boomAt < 1600)
+    private fun petActive(now: Long) = petHeld || (flingAt != NEVER && now - boomAt < if (petHome) 400 else 1600)
 
-    /** A finger went down and dragged: a cat flies out from under the camera to it. Stage px. */
+    /** A finger rested, then dragged: a cat flies out from under the camera to it. Stage px. */
     fun petDown(x: Float, y: Float, now: Long) {
         if (petHeld) return
         pet = Cat(FloatArray(0), FloatArray(0), 0f, 0f, 1.35f, (now % 100_000).toInt())
-        petAt = now; petHeld = true; flingAt = NEVER; boomAt = NEVER
+        petAt = now; petHeld = true; petHome = false; flingAt = NEVER; boomAt = NEVER
         petX = -90f; petY = y.coerceIn(60f, 536f); petDX = 1f; petDY = 0f
         petTX = x; petTY = y; petLast = now; histN = 0
     }
 
     fun petMove(x: Float, y: Float) { petTX = x; petTY = y }
 
-    /** Let go: the cat carries the finger's velocity (stage px/s), then bursts like the flyby cats. */
-    fun petFling(vx: Float, vy: Float, now: Long) {
-        if (!petHeld) return
+    /**
+     * Let go. Slower than 700 px/s it's being set down: it flies home under the camera island (false). Faster, it
+     * carries the finger's velocity (stage px/s) and bursts like the flyby cats (true).
+     */
+    fun petFling(vx: Float, vy: Float, now: Long): Boolean {
+        if (!petHeld) return false
         petHeld = false
-        val sp = hypot(vx, vy)
-        if (sp < 500f) { flingVX = petDX * 700f; flingVY = petDY * 700f }
-        else { val k = min(sp, 2400f) / sp; flingVX = vx * k; flingVY = vy * k }
         flingAt = now; flingX = petX; flingY = petY
+        val sp = hypot(vx, vy)
+        petHome = sp < 700f
+        if (petHome) { // ease in towards the island: x = x0 − 300a − 1400a²
+            val a = (-300f + sqrt(300f * 300f + 4 * 1400f * (petX + 140f).coerceAtLeast(0f))) / (2 * 1400f)
+            boomAt = now + (a * 1000).toLong()
+            return false
+        }
+        val k = min(sp, 2400f) / sp
+        flingVX = vx * k; flingVY = vy * k
         var a = 0f // burst after 0.7 s, or as it reaches the edge of the stage
         while (a < .7f) { flungPos(a); if (px !in 30f..650f || py !in 30f..566f) break; a += .01f }
         flungPos(a)
         boomAt = now + (a * 1000).toLong()
         pet?.boomX = px.coerceIn(30f, 650f); pet?.boomY = py.coerceIn(30f, 566f)
+        return true
     }
 
-    private fun flungPos(a: Float) { val d = .5f * (1 - exp(-a / .5f)); px = flingX + flingVX * d; py = flingY + flingVY * d }
+    private fun flungPos(a: Float) {
+        if (petHome) { px = flingX - 300f * a - 1400f * a * a; py = flingY - 40f * sin(min(1f, a / .5f) * PI.toFloat()); return }
+        val d = .5f * (1 - exp(-a / .5f)); px = flingX + flingVX * d; py = flingY + flingVY * d
+    }
 
     private fun drawPet(c: Canvas, now: Long) {
         val cat = pet ?: return
@@ -282,115 +396,375 @@ class MergeFx(private val art: NixieArt) {
                 hist[0] = petX - petDX * 34f * cat.scale; hist[1] = petY - petDY * 34f * cat.scale + 4f * cat.scale
                 histN = min(histN + 1, hist.size / 2); histAt = now
             }
-            rainbowFromHist(c, cat.scale, t, 1f)
+            rainbowFromHist(c, hist, histN, cat.scale, t, 1f)
             drawCat(c, petX, petY, petDX, petDY, cat.scale, t, cat.seed, t)
+        } else if (petHome) { // under the island: its trail fades, the island edge flares once
+            rainbowFromHist(c, hist, histN, cat.scale, t, max(0f, 1 - (now - boomAt) / 300f))
+            spr(c, aflare, 0f, petY, 140f, 140f, exp(-(now - boomAt) / 120f))
         } else {
-            rainbowFromHist(c, cat.scale, t, max(0f, 1 - (now - boomAt) / 300f))
+            rainbowFromHist(c, hist, histN, cat.scale, t, max(0f, 1 - (now - boomAt) / 300f))
             burst(c, cat, (now - boomAt).toFloat())
         }
     }
 
-    private fun rainbowFromHist(c: Canvas, sc: Float, t: Float, fade: Float) {
+    private fun rainbowFromHist(c: Canvas, h: FloatArray, hn: Int, sc: Float, t: Float, fade: Float) {
         var n = 0
-        for (k in 4 until histN) { tx[n] = hist[2 * k]; ty[n] = hist[2 * k + 1]; n++ } // skip the newest: the flame is there
+        for (k in 4 until hn) { tx[n] = h[2 * k]; ty[n] = h[2 * k + 1]; n++ } // skip the newest: the flame (or the cat) is there
         rainbow(c, n, sc, (t / 90).toInt(), fade)
     }
 
     // ================================================================= colony (the CATS screen)
 
-    /** A sleeping cat: centre (x, y), sprite scale, facing left if [flip], frosting [variant] 0..3, with a "z" if [zzz]. */
-    class Sleeper(val x: Float, val y: Float, val scale: Float, val flip: Boolean, val variant: Int, val seed: Int, val zzz: Boolean)
+    /**
+     * A sleeping cat: centre (x, y), sprite scale, facing left if [flip], [variant] = coat (see [coat]), with a "z" if
+     * [zzz]; [pr] is the PR it stands for; a [ghost] draws at α .55.
+     */
+    class Sleeper(val x: Float, val y: Float, val scale: Float, val flip: Boolean, val variant: Int, val seed: Int, val zzz: Boolean,
+                  val pr: Pr? = null, val ghost: Boolean = false)
+
+    private class Stir(val idx: Int, val pose: Int, val start: Long, val end: Long)
 
     private var colony: List<Sleeper> = emptyList()
-    private val flyers = ArrayList<Cat>() // the last flyers.size sleepers, in order
-    private var wakeAt = NEVER
-    private var wakeEnd = 0L
+    private val flyers = ArrayList<Cat>() // wake-all laps, arrivals, laser cats flying home; ts relative to flyAt
+    private var flyAt = NEVER
+    private val stirs = ArrayList<Stir>()
+    private val hearts = ArrayList<LongArray>() // (colony index, born)
+    private var pokeIdx = -1
+    private var pokeAt = NEVER
+    private var pokeHop = false
+    private var rubIdx = -1
 
-    private fun waking(now: Long) = now >= wakeAt && now - wakeAt < wakeEnd
+    private fun flying(now: Long) = flyers.any { now - flyAt <= it.ts + it.endT() + 600 }
 
-    /** Set the colony (call when the CATS screen opens / its data changes). Cancels any flight. */
+    /** Cats in the air, or a laser chase: hit-tests on the pile would be against empty spots. */
+    fun busy(now: Long) = flying(now) || laserOn
+
+    private fun colonyActive(now: Long) = flying(now) || laserOn || hearts.any { now - it[1] < HEART_MS } ||
+        (pokeIdx >= 0 && pokeHop && now - pokeAt < HOP_MS)
+
+    /** Set the colony (the CATS screen opened or its data changed). Cancels flights, stirs and pokes. */
     fun colony(cats: List<Sleeper>) {
-        colony = cats; wakeAt = NEVER
-        for (i in 0 until cats.size) sleeper(cats[i].variant) // bake here, not in onDraw
+        colony = cats; flyers.clear(); flyAt = NEVER; stirs.clear(); hearts.clear(); pokeIdx = -1; rubIdx = -1
+        laserOn = false; chasers.clear()
+        for (c in cats) for (p in 0..2) pose(p, c.variant) // bake here, not in onDraw
+        pose(SIT, 0); pose(SIT, PUMPKIN) // the shelf's kittens
     }
 
+    /** The colony index whose centre is nearest (x, y), within [r] stage px; -1 if none (or that cat is away). */
+    fun nearest(x: Float, y: Float, r: Float, now: Long): Int {
+        var best = -1
+        var bd = r
+        for (i in colony.indices) {
+            if (away(i, now)) continue
+            val d = hypot(colony[i].x - x, colony[i].y - y)
+            if (d <= bd) { bd = d; best = i }
+        }
+        return best
+    }
+
+    fun sleeper(i: Int): Sleeper? = colony.getOrNull(i)
+
+    /** Not on its spot: flying (an arrival's spot stays empty until it lands), or chasing the laser. */
+    private fun away(i: Int, now: Long): Boolean {
+        if (chasers.any { it.idx == i }) return true
+        val t = (now - flyAt).toFloat()
+        return flyers.any { it.idx == i && t <= it.ts + it.endT() && (t >= it.ts || it.arrive) }
+    }
+
+    private fun startFlights(now: Long) { if (!flying(now)) { flyers.clear(); flyAt = now } }
+
     /**
-     * The newest [max] cats (end of the list) wake 0–400 ms apart, fly round the stage for 2.4–3.2 s and drop
-     * back onto their spots. Returns how long it takes (ms); if a flight is already running, just what's left of it.
+     * The newest [max] cats (end of the list) wake 0–300 ms apart, fly a calm lap (rainbow only) for 1.2–1.6 s and drop
+     * back onto their spots. Returns ms from now until the first lands (for one LAND buzz); 0 if a flight is running.
      */
-    fun wake(now: Long, max: Int = 16): Long {
-        if (waking(now)) return wakeEnd - (now - wakeAt)
-        flyers.clear()
+    fun wake(now: Long, max: Int = 6): Long {
+        if (flying(now) || laserOn) return 0
+        startFlights(now)
         val run = (now % 100_000).toInt() // a new flight every time
         for (i in (colony.size - max).coerceAtLeast(0) until colony.size) {
             val h = colony[i]
             val s = h.seed + 97 * run
-            flyers += route(s, 400f * rnd(s, 0, 5), 2400f + 800f * rnd(s, 0, 6), h.scale, h.x, h.y, h.x, h.y, h.variant)
+            flyers += route(s, 300f * rnd(s, 0, 5), 1200f + 400f * rnd(s, 0, 6), h.scale, h.x, h.y, h.x, h.y, h.variant,
+                calm = true, idx = i, loops = false)
             fly(h.variant, 0); fly(h.variant, 1) // bake here, not in onDraw
         }
-        wakeAt = now
-        wakeEnd = flyers.maxOfOrNull { (it.ts + it.dur).toLong() + 600 } ?: 0 // the landing puff settles
-        return wakeEnd
+        return flyers.minOfOrNull { (it.ts + it.dur).toLong() } ?: 0
     }
 
-    /** Sleepers (skipping cats in flight) + flights. Static when nothing flies. [alpha] = screen dim (night/stale). */
-    fun drawColony(c: Canvas, now: Long, alpha: Float) {
-        val flying = waking(now)
-        val t = (now - wakeAt).toFloat()
-        val from = colony.size - flyers.size
-        sleepPaint.alpha = (255 * alpha.coerceIn(0f, 1f)).toInt()
-        for (i in 0 until colony.size) {
-            val h = colony[i]
-            if (flying && i >= from) { val f = flyers[i - from]; if (t >= f.ts && t <= f.ts + f.dur) continue }
-            val b = sleeper(h.variant)
-            c.save(); c.translate(h.x, h.y); c.scale(if (h.flip) -h.scale else h.scale, h.scale)
-            c.drawBitmap(b, -b.width / 2f, -b.height / 2f, sleepPaint)
-            c.restore()
-            if (h.zzz) { // over its head, never mirrored
-                val zx = h.x + (if (h.flip) -42f else 42f) * h.scale; val zy = h.y - 24f * h.scale; val r = 6f * h.scale
-                dst.set(zx - r, zy - r, zx + r, zy + r)
-                c.drawBitmap(zzz, null, dst, sleepPaint)
-            }
+    /**
+     * New cats come home (UX-PASS #3/#4): each flies in from (fromX, fromY) — under the island, or off the open-PR shelf —
+     * 250 ms apart, does a short calm lap and curls up on its spot. Returns ms until the first lands.
+     */
+    fun arrive(from: List<Triple<Int, Float, Float>>, now: Long): Long {
+        if (from.isEmpty()) return 0
+        startFlights(now)
+        val t0 = (now - flyAt).toFloat()
+        from.forEachIndexed { k, (i, x0, y0) ->
+            val h = colony.getOrNull(i) ?: return@forEachIndexed
+            val s = h.seed + 31
+            val cat = route(s, t0 + 250f * k, 1300f + 300f * rnd(s, 0, 6), h.scale, x0, y0, h.x, h.y, h.variant,
+                calm = true, idx = i, loops = false, arrive = true)
+            if (x0 < 0f) { var u = 0f; while (u < 1f) { catPos(cat, u); if (px >= 0f) { cat.enterT = cat.ts + u * cat.dur; cat.enterY = py; break }; u += .002f } }
+            flyers += cat
+            fly(h.variant, 0); fly(h.variant, 1)
         }
-        if (flying) drawCats(c, flyers, t, true)
+        return flyers.filter { it.arrive }.minOf { (it.ts + it.dur).toLong() } - t0.toLong()
     }
+
+    /** Cat [i] shows [pose] (HEAD_UP for "something's new") from [start] to [end] (uptime). The caller draws one frame at each edge. */
+    fun stir(i: Int, pose: Int, start: Long, end: Long) { stirs += Stir(i, pose, start, end) }
+
+    /** The colony indices nearest cat [i]'s spot (its neighbours look up when it lands). */
+    fun neighbours(i: Int, n: Int): List<Int> {
+        val h = colony.getOrNull(i) ?: return emptyList()
+        return colony.indices.filter { it != i }.sortedBy { hypot(colony[it].x - h.x, colony[it].y - h.y) }.take(n)
+    }
+
+    /** Poke cat [i]: a `!` over its head; with [hop], a 380 ms hop and it sits up (until [unpoke] or 4 s). */
+    fun poke(i: Int, now: Long, hop: Boolean) { pokeIdx = i; pokeAt = now; pokeHop = hop }
+
+    fun unpoke() { pokeIdx = -1 }
+
+    /** Cat [i] is being rubbed: its glyph is a heart instead of a z; [heart] sends one floating up (at most 4 alive). */
+    fun rub(i: Int) { rubIdx = i }
+
+    fun heart(i: Int, now: Long) {
+        hearts.removeAll { now - it[1] >= HEART_MS }
+        if (hearts.size >= 4) hearts.removeAt(0)
+        hearts += longArrayOf(i.toLong(), now)
+    }
+
+    /** Sleepers (skipping cats that are away) + flights + the laser chase. Static when nothing moves. [alpha] = screen dim. */
+    fun drawColony(c: Canvas, now: Long, alpha: Float) {
+        val a = alpha.coerceIn(0f, 1f)
+        for (i in colony.indices) {
+            val h = colony[i]
+            if (away(i, now)) continue
+            var p = stirs.lastOrNull { it.idx == i && now >= it.start && now < it.end }?.pose ?: SLEEP
+            var dy = 0f
+            val poked = i == pokeIdx && now - pokeAt < POKE_MS
+            if (poked && pokeHop) {
+                p = SIT
+                val u = (now - pokeAt) / HOP_MS.toFloat()
+                if (u < 1f) dy = -26f * h.scale * 4 * u * (1 - u)
+            }
+            drawSprite(c, pose(p, h.variant), h.x, h.y + dy, h.scale, h.flip, a * if (h.ghost) .55f else 1f)
+            // one glyph over its head, never mirrored: ! (just poked) > heart (being rubbed) > z (asleep)
+            val g = when { poked -> bang; i == rubIdx -> heartBmp; h.zzz && p == SLEEP -> zzz; else -> null } ?: continue
+            val zx = h.x + (if (h.flip) -42f else 42f) * h.scale; val zy = h.y + dy - 24f * h.scale; val r = 6f * h.scale
+            dst.set(zx - r, zy - r, zx + r, zy + r)
+            sleepPaint.alpha = (255 * a).toInt()
+            c.drawBitmap(g, null, dst, sleepPaint)
+        }
+        for (hh in hearts) { // float up from the glyph slot and fade
+            val u = (now - hh[1]) / HEART_MS.toFloat()
+            val h = colony.getOrNull(hh[0].toInt()) ?: continue
+            if (u < 0f || u >= 1f) continue
+            val zx = h.x + (if (h.flip) -42f else 42f) * h.scale + 6f * sin(u * 9f); val zy = h.y - 24f * h.scale - 46f * u
+            val r = 7f * (.8f + .4f * u)
+            dst.set(zx - r, zy - r, zx + r, zy + r)
+            sleepPaint.alpha = (255 * a * (if (u < .6f) 1f else 1 - (u - .6f) / .4f)).toInt()
+            c.drawBitmap(heartBmp, null, dst, sleepPaint)
+        }
+        if (flyAt != NEVER) drawCats(c, flyers, (now - flyAt).toFloat(), a)
+        if (laserOn || chasers.isNotEmpty()) drawLaser(c, now, a)
+    }
+
+    /** One colony sprite: [b] centred at (x, y), [sc], mirrored if [flip]. */
+    private fun drawSprite(c: Canvas, b: Bitmap, x: Float, y: Float, sc: Float, flip: Boolean, alpha: Float) {
+        sleepPaint.alpha = (255 * alpha.coerceIn(0f, 1f)).toInt()
+        c.save(); c.translate(x, y); c.scale(if (flip) -sc else sc, sc)
+        c.drawBitmap(b, -b.width / 2f, -b.height / 2f, sleepPaint)
+        c.restore()
+    }
+
+    /** A sitting-up cat (an open PR's kitten on the shelf; MeterView owns the shelf). */
+    fun drawSit(c: Canvas, x: Float, y: Float, sc: Float, v: Int, flip: Boolean, alpha: Float) =
+        drawSprite(c, pose(SIT, v), x, y, sc, flip, alpha)
 
     /** Touchdown: a little puff of sparks kicked up round its spot. */
     private fun puff(c: Canvas, cat: Cat, t: Float) {
-        val t0 = cat.ts + cat.dur
+        val t0 = cat.ts + cat.endT()
         sparks(c, t, cat.seed + 4, 14, false, -165f, -15f, 60f, 200f, 500f, .4f, .25f, .45f, 1.3f, 18f, { _, r -> t0 + r * 40 }) { r1, _, _ ->
             sx = cat.boomX + (r1 - .5f) * 70f * cat.scale; sy = cat.boomY + 22f * cat.scale
         }
     }
 
+    // ----------------------------------------------------------------- laser dot (hold, then drag, on CATS)
+
+    private class Chaser(val idx: Int, var x: Float, var y: Float, val k: Float) {
+        var vx = 0f; var vy = 0f; var dx = 1f; var dy = 0f
+        val hist = FloatArray(2 * (TRAIL / 2 + 4)); var histN = 0; var histAt = 0L
+    }
+    private val chasers = ArrayList<Chaser>()
+    private var laserOn = false
+    private var laserX = 0f
+    private var laserY = 0f
+    private var laserStill = 0L
+    private var laserLast = 0L
+    private var laserAt = 0L
+    private var stillX = 0f
+    private var stillY = 0f
+    private var pounceAt = NEVER
+    private var pouncer = -1
+    /** A chaser pounced on the dot (MeterView buzzes LAND). */
+    var onPounce: (() -> Unit)? = null
+
+    /** The 3 newest cats wake and chase a red dot that sits just above the fingertip (x, y). Small-PR cats dart, XL ones lumber. */
+    fun laserDown(x: Float, y: Float, now: Long) {
+        laserOn = true; laserX = x; laserY = y - 44f; laserStill = now; laserLast = now; laserAt = now; pounceAt = NEVER; pouncer = -1
+        stillX = laserX; stillY = laserY
+        chasers.clear()
+        for (i in (colony.size - 3).coerceAtLeast(0) until colony.size) {
+            val h = colony[i]
+            if (away(i, now)) continue
+            chasers += Chaser(i, h.x, h.y, if (h.scale < .7f) 70f else if (h.scale < .9f) 45f else 28f)
+            fly(h.variant, 0); fly(h.variant, 1)
+        }
+    }
+
+    fun laserMove(x: Float, y: Float, now: Long) {
+        laserX = x; laserY = y - 44f
+        // still = within 8 px of where it last stopped (per-event deltas are tiny on a slow drag)
+        if (hypot(laserX - stillX, laserY - stillY) > 8f) { laserStill = now; pounceAt = NEVER; stillX = laserX; stillY = laserY }
+    }
+
+    /** Let go: the dot goes out and the chasers fly home (calm, 0.7 s). Returns ms until the first lands (0: nobody's flying). */
+    fun laserUp(now: Long): Long {
+        if (!laserOn) return 0
+        laserOn = false
+        if (chasers.isEmpty()) return 0
+        startFlights(now)
+        val t0 = (now - flyAt).toFloat()
+        for (ch in chasers) {
+            val h = colony.getOrNull(ch.idx) ?: continue
+            val pts = floatArrayOf(ch.x, ch.y, (ch.x + h.x) / 2, min(ch.y, h.y) - 60f, h.x, h.y - 80f, h.x, h.y)
+            flyers += cat(pts, h.seed + 7, t0, 700f, h.scale, h.x, h.y, h.variant, HOME, true, ch.idx, true, true)
+        }
+        chasers.clear()
+        return 700
+    }
+
+    private fun drawLaser(c: Canvas, now: Long, alpha: Float) {
+        val dt = (now - laserLast).coerceIn(0, 50) / 1000f; laserLast = now
+        if (laserOn && pounceAt == NEVER && now - laserStill > 400 && chasers.isNotEmpty()) { // held still: the nearest pounces
+            pounceAt = now
+            pouncer = chasers.indices.minByOrNull { hypot(chasers[it].x - laserX, chasers[it].y - laserY) } ?: -1
+            onPounce?.invoke()
+        }
+        am = 1f; paint = overPaint
+        chasers.forEachIndexed { j, ch ->
+            val h = colony.getOrNull(ch.idx) ?: return@forEachIndexed
+            val pounce = j == pouncer && now - pounceAt < 300
+            val lt = (now - laserAt).toFloat() // not raw uptime: a float of weeks of uptime only resolves ~100 ms
+            val ang = TAU * j / 3 + lt / 900f // circle the dot a body-length out, each on its own side
+            val tx0 = laserX + if (pounce) 0f else 78f * h.scale * kotlin.math.cos(ang)
+            val ty0 = laserY + if (pounce) 0f else 46f * h.scale * sin(ang)
+            val k = if (pounce) 160f else ch.k
+            ch.vx += (k * (tx0 - ch.x) - 2 * sqrt(k) * ch.vx) * dt
+            ch.vy += (k * (ty0 - ch.y) - 2 * sqrt(k) * ch.vy) * dt
+            val sp = hypot(ch.vx, ch.vy)
+            if (sp > 1100f) { ch.vx *= 1100f / sp; ch.vy *= 1100f / sp }
+            ch.x += ch.vx * dt; ch.y += ch.vy * dt
+            if (sp > 30f) { ch.dx = ch.vx / sp; ch.dy = ch.vy / sp }
+            if (ch.histN == 0 || now - ch.histAt >= 14) {
+                System.arraycopy(ch.hist, 0, ch.hist, 2, ch.hist.size - 2)
+                ch.hist[0] = ch.x - ch.dx * 34f * h.scale; ch.hist[1] = ch.y - ch.dy * 34f * h.scale + 4f * h.scale
+                ch.histN = min(ch.histN + 1, ch.hist.size / 2); ch.histAt = now
+            }
+            rainbowFromHist(c, ch.hist, ch.histN, h.scale, lt, 1f)
+            drawCat(c, ch.x, ch.y, ch.dx, ch.dy, h.scale, lt, h.seed, lt, h.variant, fire = false,
+                alpha = (255 * alpha * if (h.ghost) .55f else 1f).toInt())
+        }
+        if (laserOn) { // the dot: a hot red core in a soft glow
+            paint = addPaint
+            spr(c, redGlow, laserX, laserY, 64f, 64f, 1f)
+            dotPaint.alpha = 255; c.drawCircle(laserX, laserY, 5f, dotPaint)
+            paint = overPaint
+        }
+    }
+
+    private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFFFE0E0.toInt() }
+
+    // ----------------------------------------------------------------- the goal surge's rocket cat, the peeking cat
+
+    private val rockets = ArrayList<Cat>()
+    private var rocketAt = NEVER
+
+    /** The goal bargraph's cat (UX-PASS #9): it rockets along the tube at y from x0 out of the right end, then a puff. */
+    fun rocket(at: Long, x0: Float, y: Float, v: Int) {
+        rocketAt = at; rockets.clear()
+        val pts = floatArrayOf(x0, y, x0 + 160f, y - 5f, 470f, y - 2f, 760f, y)
+        rockets += cat(pts, (at % 100_000).toInt(), 0f, ROCKET_MS.toFloat(), .55f, 650f, y, v, EXIT, false, -1, false, false)
+        fly(v, 0); fly(v, 1)
+    }
+
+    private var peekAt = NEVER
+    private var peekDur = 0L
+    private var peekY = 0f
+    private var peekX = 0f
+    private var peekV = 0
+
     /**
-     * Firework: the cat bursts with a bang and golden crackle into a ring of mini cats that fly out
-     * like stars from a shell, droop under gravity (drag τ .55 s) and fade, each with its own rainbow
-     * streak and burning butt. Pure function of t, like everything else.
+     * A cat's head peeks out from under the camera island at height [y], reaching to centre x [x] (UX-PASS #8, and its
+     * paw for #19's rescue): slides out in 300 ms, bobs, blinks once, slides back by [dur].
      */
+    fun peek(at: Long, y: Float, x: Float, dur: Long, v: Int) { peekAt = at; peekY = y; peekX = x; peekDur = dur; peekV = v; fly(v, 0) }
+
+    fun unpeek() { peekAt = NEVER }
+
+    private fun drawPeek(c: Canvas, now: Long) {
+        val t = (now - peekAt).toFloat()
+        if (t < 0 || t >= peekDur) return
+        val u = when {
+            t < 300f -> 1 - (1 - t / 300f).pow(3)
+            t > peekDur - 300f -> (1 - (t - (peekDur - 300f)) / 300f).pow(2)
+            else -> 1f
+        }
+        val x = -80f + (peekX + 80f) * u
+        val y = peekY + 3f * sin(t / 170f)
+        val frame = fly(peekV, 0)
+        catPaint.alpha = 255
+        c.save(); c.translate(x, y); c.scale(1.1f, 1.1f)
+        c.drawBitmap(frame, -frame.width / 2f, -frame.height / 2f, catPaint)
+        if (t in 1300f..1420f) { // a blink: fur over both eyes (sprite px (22, 10) and (28, 10), 3 px each)
+            blinkPaint.color = 0xFF9C9C9C.toInt()
+            c.drawRect(-frame.width / 2f + 22 * 3, -frame.height / 2f + 10 * 3, -frame.width / 2f + 24 * 3, -frame.height / 2f + 12 * 3, blinkPaint)
+            c.drawRect(-frame.width / 2f + 28 * 3, -frame.height / 2f + 10 * 3, -frame.width / 2f + 30 * 3, -frame.height / 2f + 12 * 3, blinkPaint)
+        }
+        c.restore()
+    }
+
+    private val blinkPaint = Paint()
+
+    /** Firework: the cat bursts with a bang and golden crackle into a ring of mini cats that fly out
+     *  like stars from a shell, droop under gravity (drag τ .55 s) and fade, each with its own rainbow
+     *  streak and burning butt. A [Cat.gold] shell (a clean sweep) is bigger and brighter. Pure function of t. */
     private fun burst(c: Canvas, cat: Cat, t: Float) {
-        val t0 = cat.ts + cat.dur
+        val t0 = cat.ts + cat.endT()
         val a = (t - t0) / 1000
         if (a < 0 || a > 1.6f) return
         val s = cat.seed
+        val g = if (cat.gold) 1.7f else 1f
         paint = addPaint
-        spr(c, flare, cat.boomX, cat.boomY, 460f * cat.scale, 460f * cat.scale, decay(t, t0, 130f))
-        spr(c, aflare, cat.boomX, cat.boomY, 220f, 220f, .9f * decay(t, t0, 80f))
-        sparks(c, t, s + 3, 48, false, -180f, 180f, 180f, 640f, 500f, .7f, .6f, 1.1f, 1.6f, 30f,
+        spr(c, flare, cat.boomX, cat.boomY, 460f * cat.scale * g, 460f * cat.scale * g, decay(t, t0, 130f * g))
+        spr(c, aflare, cat.boomX, cat.boomY, 220f * g, 220f * g, .9f * decay(t, t0, 80f))
+        sparks(c, t, s + 3, if (cat.gold) 110 else 48, false, -180f, 180f, 180f, 640f * g, 500f, .7f, .6f, 1.1f, 1.6f, 30f,
             { _, r -> t0 + r * 40 }) { _, _, _ -> sx = cat.boomX; sy = cat.boomY }
         paint = overPaint
-        for (k in 0 until MINIS) {
+        val minis = if (cat.gold) 14 else MINIS
+        for (k in 0 until minis) {
             val life = lerp(1.1f, 1.5f, rnd(s, k, 41))
             if (a >= life) continue
-            val ang = TAU * k / MINIS + (rnd(s, k, 42) - .5f) * .5f
-            val spd = lerp(260f, 470f, rnd(s, k, 43))
+            val ang = TAU * k / minis + (rnd(s, k, 42) - .5f) * .5f
+            val spd = lerp(260f, 470f, rnd(s, k, 43)) * if (cat.gold) 1.25f else 1f
             val vx = kotlin.math.cos(ang) * spd
             val vy = sin(ang) * spd - 120f // a little lift, like a shell's stars
-            val tau = .55f; val g = 420f
+            val tau = .55f; val gr = 420f
             val e = exp(-a / tau); val d = tau * (1 - e)
             val x = cat.boomX + vx * d
-            val y = cat.boomY + g * tau * a + (vy - g * tau) * d
-            val dx = vx * e; val dy = g * tau + (vy - g * tau) * e
+            val y = cat.boomY + gr * tau * a + (vy - gr * tau) * d
+            val dx = vx * e; val dy = gr * tau + (vy - gr * tau) * e
             val v = max(1e-3f, hypot(dx, dy)); val ux = dx / v; val uy = dy / v
             val fade = if (a < .7f * life) 1f else max(0f, 1 - (a - .7f * life) / (.3f * life))
             val sc = cat.scale * lerp(.36f, .5f, rnd(s, k, 44))
@@ -408,7 +782,7 @@ class MergeFx(private val art: NixieArt) {
             c.restore()
             val face = if (ux >= 0) 1f else -1f
             val tilt = Math.toDegrees(atan2(uy, abs(ux)).toDouble()).toFloat().coerceIn(-70f, 70f)
-            val frame = if ((a * 1000 / 70).toInt() % 2 == 0) catA else catB
+            val frame = fly(if (cat.gold) GOLD else 0, if ((a * 1000 / 70).toInt() % 2 == 0) 0 else 1)
             catPaint.alpha = (255 * fade).toInt()
             c.save(); c.translate(x, y); c.rotate(tilt * face); c.scale(face * sc, sc)
             c.drawBitmap(frame, -frame.width / 2f, -frame.height / 2f, catPaint)
@@ -430,15 +804,16 @@ class MergeFx(private val art: NixieArt) {
     private val tnx = FloatArray(2 * TRAIL)
     private val tny = FloatArray(2 * TRAIL)
 
-    /** Six stripes along the butt's recent path, stepping up/down like the classic trail. */
+    /** Six stripes along the butt's recent path (half as long on a calm colony flight). */
     private fun trail(c: Canvas, cat: Cat, lt: Float) {
         var n = 0
-        for (k in 0 until TRAIL) {
-            val tk = min(lt, cat.dur) - (k + 4) * 14f // starts ~4 samples back: the butt flame fills the gap
+        val endT = cat.endT()
+        for (k in 0 until if (cat.calm) TRAIL / 2 else TRAIL) {
+            val tk = min(lt, endT) - (k + 4) * 14f // starts ~4 samples back: the butt flame fills the gap
             if (tk < 0) break
             pose(cat, tk); tx[n] = bx; ty[n] = by; n++
         }
-        val fade = if (lt > cat.dur) max(0f, 1 - (lt - cat.dur) / 300) else 1f // gone as the cat bursts
+        val fade = if (lt > endT) max(0f, 1 - (lt - endT) / 300) else 1f // gone as the cat bursts
         rainbow(c, n, cat.scale, (lt / 90).toInt(), fade)
     }
 
@@ -467,10 +842,10 @@ class MergeFx(private val art: NixieArt) {
     private val catPaint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val catA = bakeCat(0)
     private val catB = bakeCat(1)
-    private val flyV = arrayOf<Bitmap?>(catA, catB, null, null, null, null, null, null) // frame pairs per frosting
+    private val flyV = arrayOfNulls<Bitmap>(2 * COATS).also { it[0] = catA; it[1] = catB } // frame pairs per coat
     private fun fly(v: Int, f: Int) = flyV[2 * v + f] ?: bakeCat(f, v).also { flyV[2 * v + f] = it }
 
-    /** 34×21 pixel cat at 3 px per pixel; frame 1 moves the legs and tail. [v]: frosting variant. */
+    /** 34×21 pixel cat at 3 px per pixel; frame 1 moves the legs and tail. [v]: coat. */
     private fun bakeCat(frame: Int, v: Int = 0): Bitmap {
         val bmp = Bitmap.createBitmap(34 * 3, 21 * 3, Bitmap.Config.ARGB_8888)
         val c = Canvas(bmp).apply { scale(3f, 3f) }
@@ -478,7 +853,7 @@ class MergeFx(private val art: NixieArt) {
         fun r(x: Int, y: Int, w: Int, h: Int, col: Int) { p.color = col; c.drawRect(x.toFloat(), y.toFloat(), (x + w).toFloat(), (y + h).toFloat(), p) }
         fun dot(x: Int, y: Int, col: Int) = r(x, y, 1, 1, col)
         fun clear(x: Int, y: Int) { p.xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR); dot(x, y, 0); p.xfermode = null }
-        val k = Color.BLACK; val fur = 0xFF9C9C9C.toInt(); val crust = 0xFFFFCC99.toInt()
+        val k = Color.BLACK; val fur = 0xFF9C9C9C.toInt(); val crust = CRUST[v]
         val frost = FROST[v]; val sprinkle = SPRINKLE[v]; val cheek = 0xFFFF8FA3.toInt()
         // tail, wagging
         val ty = if (frame == 0) 7 else 10
@@ -507,18 +882,24 @@ class MergeFx(private val art: NixieArt) {
     }
 
     private val sleepPaint = Paint(Paint.FILTER_BITMAP_FLAG)
-    private val sleepers = arrayOfNulls<Bitmap>(4)
-    private fun sleeper(v: Int) = sleepers[v] ?: bakeSleeper(v).also { sleepers[v] = it }
+    private val poses = arrayOfNulls<Bitmap>(3 * COATS)
 
-    /** 34×20 pixel cat curled up asleep, same family as [bakeCat]: head down on its paws, eyes shut, tail wrapped round. */
-    private fun bakeSleeper(v: Int): Bitmap {
+    /** Colony sprite: SLEEP, HEAD_UP (awake, head raised: something's new) or SIT (poked; an open PR's kitten). */
+    private fun pose(p: Int, v: Int) = poses[3 * v + p] ?: (if (p == SIT) bakeCat(0, v) else bakeSleeper(v, p == HEAD_UP))
+        .also { poses[3 * v + p] = it }
+
+    /**
+     * 34×20 pixel cat curled up asleep, same family as [bakeCat]: head down on its paws, eyes shut, tail wrapped round.
+     * [up]: the head lifted 3 px off its paws with its eyes open.
+     */
+    private fun bakeSleeper(v: Int, up: Boolean = false): Bitmap {
         val bmp = Bitmap.createBitmap(34 * 3, 20 * 3, Bitmap.Config.ARGB_8888)
         val c = Canvas(bmp).apply { scale(3f, 3f) }
         val p = Paint()
         fun r(x: Int, y: Int, w: Int, h: Int, col: Int) { p.color = col; c.drawRect(x.toFloat(), y.toFloat(), (x + w).toFloat(), (y + h).toFloat(), p) }
         fun dot(x: Int, y: Int, col: Int) = r(x, y, 1, 1, col)
         fun clear(x: Int, y: Int) { p.xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR); dot(x, y, 0); p.xfermode = null }
-        val k = Color.BLACK; val fur = 0xFF9C9C9C.toInt(); val crust = 0xFFFFCC99.toInt(); val cheek = 0xFFFF8FA3.toInt()
+        val k = Color.BLACK; val fur = 0xFF9C9C9C.toInt(); val crust = CRUST[v]; val cheek = 0xFFFF8FA3.toInt()
         // pop-tart body
         r(3, 2, 21, 15, k); r(4, 3, 19, 13, crust)
         for ((x, y) in listOf(3 to 2, 23 to 2, 3 to 16, 23 to 16)) clear(x, y)
@@ -529,25 +910,39 @@ class MergeFx(private val art: NixieArt) {
         // tail: up the back and round the bottom
         r(0, 11, 4, 9, k); r(1, 12, 2, 6, fur); clear(0, 11); clear(3, 11); clear(0, 19)
         r(1, 16, 24, 4, k); r(2, 17, 22, 2, fur); r(1, 16, 2, 2, fur)
-        // head, down on its paws, eyes shut
-        r(20, 5, 4, 3, k); r(21, 6, 2, 2, fur); clear(20, 5)
-        r(28, 5, 4, 3, k); r(29, 6, 2, 2, fur); clear(31, 5)
-        r(19, 7, 14, 12, k); r(20, 8, 12, 10, fur)
-        for ((x, y) in listOf(19 to 7, 32 to 7, 19 to 18, 32 to 18)) clear(x, y)
-        r(21, 6, 2, 2, fur); r(29, 6, 2, 2, fur)
-        r(21, 12, 3, 1, k); r(28, 12, 3, 1, k)
-        r(20, 14, 2, 2, cheek); r(30, 14, 2, 2, cheek)
-        dot(25, 13, k); dot(26, 13, k)
-        r(24, 15, 4, 1, k); dot(23, 14, k); dot(28, 14, k)
-        // paws under the chin
+        // head, down on its paws (eyes shut) or lifted (eyes open)
+        val o = if (up) -3 else 0
+        r(20, 5 + o, 4, 3, k); r(21, 6 + o, 2, 2, fur); clear(20, 5 + o)
+        r(28, 5 + o, 4, 3, k); r(29, 6 + o, 2, 2, fur); clear(31, 5 + o)
+        r(19, 7 + o, 14, 12, k); r(20, 8 + o, 12, 10, fur)
+        for ((x, y) in listOf(19 to 7 + o, 32 to 7 + o, 19 to 18 + o, 32 to 18 + o)) clear(x, y)
+        r(21, 6 + o, 2, 2, fur); r(29, 6 + o, 2, 2, fur)
+        if (up) { r(22, 11 + o, 2, 2, k); dot(22, 11 + o, Color.WHITE); r(28, 11 + o, 2, 2, k); dot(28, 11 + o, Color.WHITE) }
+        else { r(21, 12, 3, 1, k); r(28, 12, 3, 1, k) }
+        r(20, 14 + o, 2, 2, cheek); r(30, 14 + o, 2, 2, cheek)
+        dot(25, 13 + o, k); dot(26, 13 + o, k)
+        r(24, 15 + o, 4, 1, k); dot(23, 14 + o, k); dot(28, 14 + o, k)
+        // paws under the chin, over the head's outline (drawn last, as the original sprite)
         r(24, 16, 10, 4, k); r(25, 17, 3, 2, fur); r(29, 17, 4, 2, fur); clear(33, 16); clear(33, 19); clear(24, 19)
         return bmp
     }
 
-    /** The colony's "z" (label colour), 4×4 px at 3 px per pixel; it sits over the head at sprite px (29, 0). */
-    private val zzz = Bitmap.createBitmap(12, 12, Bitmap.Config.ARGB_8888).also { b ->
-        val c = Canvas(b); val p = Paint().apply { color = 0xFF5E4C3E.toInt() }
-        c.drawRect(0f, 0f, 12f, 3f, p); c.drawRect(6f, 3f, 9f, 6f, p); c.drawRect(3f, 6f, 6f, 9f, p); c.drawRect(0f, 9f, 12f, 12f, p)
+    /** 4×4 px glyphs at 3 px per pixel for the slot over a colony cat's head. */
+    private fun glyph4(col: Int, vararg rows: String) = Bitmap.createBitmap(12, 12, Bitmap.Config.ARGB_8888).also { b ->
+        val c = Canvas(b); val p = Paint().apply { color = col }
+        rows.forEachIndexed { y, row -> row.forEachIndexed { x, ch -> if (ch == '#') c.drawRect(x * 3f, y * 3f, x * 3f + 3, y * 3f + 3, p) } }
+    }
+    private val zzz = glyph4(0xFF5E4C3E.toInt(), "####", "  # ", " #  ", "####") // label colour: asleep
+    private val bang = glyph4(0xFFFFB27A.toInt(), " ## ", " ## ", "    ", " ## ")  // event colour: just poked
+    private val heartBmp = Bitmap.createBitmap(15, 15, Bitmap.Config.ARGB_8888).also { b -> // cheek pink, 5×5
+        val c = Canvas(b); val p = Paint().apply { color = 0xFFFF8FA3.toInt() }
+        for ((y, row) in listOf(" # # ", "#####", "#####", " ### ", "  #  ").withIndex())
+            row.forEachIndexed { x, ch -> if (ch == '#') c.drawRect(x * 3f, y * 3f, x * 3f + 3, y * 3f + 3, p) }
+    }
+    private val redGlow = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888).also { b ->
+        Canvas(b).drawRect(0f, 0f, 32f, 32f, Paint().apply {
+            shader = RadialGradient(16f, 16f, 16f, intArrayOf(0xFFFF6A5A.toInt(), 0x88FF1A0A.toInt(), 0x00FF0000), floatArrayOf(0f, .35f, 1f), Shader.TileMode.CLAMP)
+        })
     }
 
     // ================================================================= Flashover (fire)
@@ -580,8 +975,10 @@ class MergeFx(private val art: NixieArt) {
 
     fun draw(c: Canvas, now: Long) {
         if (now >= fireAt && now - fireAt < if (night) 1000 else FIRE_END[tier]) drawFire(c, (now - fireAt).toFloat())
-        if (now >= catsAt && now - catsAt < catsEnd) drawCats(c, cats, (now - catsAt).toFloat(), false)
+        if (now >= catsAt && now - catsAt < catsEnd) drawCats(c, cats, (now - catsAt).toFloat())
+        if (now >= rocketAt && now - rocketAt < ROCKET_MS + 700) drawCats(c, rockets, (now - rocketAt).toFloat())
         if (petActive(now)) drawPet(c, now)
+        drawPeek(c, now)
     }
 
     private fun drawFire(c: Canvas, t: Float) {
@@ -1094,29 +1491,64 @@ class MergeFx(private val art: NixieArt) {
         private const val MINIS = 9 // mini cats per firework
         private const val TAU = (2 * PI).toFloat()
         private val FIRE_END = longArrayOf(800, 2400, 3500, 3750)
-        private val FROST = intArrayOf(0xFFFF99EE.toInt(), 0xFF8CCBFF.toInt(), 0xFF9EF2C4.toInt(), 0xFFFFEE8A.toInt()) // pink, blue, mint, lemon
-        private val SPRINKLE = intArrayOf(0xFFFF3399.toInt(), 0xFFFFEE33.toInt(), 0xFFFF3399.toInt(), 0xFF2AA8FF.toInt())
+        // How a cat's flight ends.
+        private const val BURST = 0
+        private const val HOME = 1
+        private const val DIVE = 2
+        private const val EXIT = 3
+        // Colony poses.
+        const val SLEEP = 0
+        const val HEAD_UP = 1
+        const val SIT = 2
+        const val POKE_MS = 4000L // a poked cat sits up (and its tag shows) this long
+        private const val HOP_MS = 380L
+        private const val HEART_MS = 900L
+        private const val ROCKET_MS = 650L
+        /** Coats: 0..3 frostings by repo rank (pink, blue, mint, lemon), then the rare and seasonal ones. */
+        const val COATS = 6
+        const val PUMPKIN = 4
+        const val GOLD = 5
+        private val FROST = intArrayOf(0xFFFF99EE.toInt(), 0xFF8CCBFF.toInt(), 0xFF9EF2C4.toInt(), 0xFFFFEE8A.toInt(),
+            0xFFFF9A3C.toInt(), 0xFFFFE27A.toInt())
+        private val SPRINKLE = intArrayOf(0xFFFF3399.toInt(), 0xFFFFEE33.toInt(), 0xFFFF3399.toInt(), 0xFF2AA8FF.toInt(),
+            0xFF4A2A10.toInt(), 0xFFFFFFFF.toInt())
+        private val CRUST = intArrayOf(0xFFFFCC99.toInt(), 0xFFFFCC99.toInt(), 0xFFFFCC99.toInt(), 0xFFFFCC99.toInt(),
+            0xFFFFCC99.toInt(), 0xFFE0A93A.toInt())
         /** Sleeping sprite at scale 1, stage px. */
         internal const val SLEEP_W = 102f
         internal const val SLEEP_H = 60f
 
+        /** The week's top 3 repos (by PRs, then name) wear frostings 0..2; everyone else 3. */
+        fun rank(prs: List<Pr>): Map<String, Int> = prs.groupingBy { it.repo }.eachCount().entries
+            .sortedWith(compareBy({ -it.value }, { it.key })).take(3).mapIndexed { i, e -> e.key to i }.toMap()
+
+        /** A cat's coat (UX-PASS §5): rare gold (decided by the PR id, ~1 in 400) > pumpkin for Halloween week > repo rank. */
+        fun coat(p: Pr, rank: Map<String, Int>, today: LocalDate): Int = when {
+            rnd(p.id.hashCode(), 0, 88) < .0025f -> GOLD
+            today.month == Month.OCTOBER && today.dayOfMonth >= 25 -> PUMPKIN
+            else -> rank[p.repo] ?: 3
+        }
+
+        /** The other rare one (~1 in 400): a ghost cat, drawn at α .55. */
+        fun ghost(p: Pr) = rnd(p.id.hashCode(), 0, 88).let { it >= .0025f && it < .005f }
+
         /**
-         * Deterministic pile for the colony screen: one cat per PR (oldest first), scale by tier, variant (0..3 frosting)
-         * by repo hash, seed by PR id. Fits inside the stage below y 52 (label row) and >= 24 px from the edges;
+         * Deterministic pile for the colony screen: one cat per PR (oldest first), scale by tier, coat by [coat], seed by
+         * PR id. Fits inside the stage below y [top] (the label row, or the open-PR shelf) and >= 24 px from the edges;
          * shrinks all cats when crowded; returns at most [max] (newest kept) — caller shows "+N" for the rest.
          */
-        fun pile(prs: List<Pr>, max: Int = 60): List<Sleeper> {
+        fun pile(prs: List<Pr>, max: Int = 60, top: Float = 52f, coat: (Pr) -> Int = { Math.floorMod(it.repo.hashCode(), 4) }): List<Sleeper> {
             val ps = prs.sortedWith(compareBy<Pr>({ it.mergedAtMs }, { it.id })).takeLast(max)
             var k = 1f
-            while (true) { stack(ps, k)?.let { return it }; k *= .95f }
+            while (true) { stack(ps, k, top, coat)?.let { return it }; k *= .95f }
         }
 
         /**
          * Rows from the floor (y 560) up, oldest first, each cat resting on whatever is under it (so no cat is ever under
-         * a newer one); odd rows hold less, so they sit brick-offset. Null if the pile pokes above y 52 at shrink [k].
+         * a newer one); odd rows hold less, so they sit brick-offset. Null if the pile pokes above [top] at shrink [k].
          * ponytail: no rounded-corner test — [24, 656] × [52, 560] already lies inside both corner arcs.
          */
-        private fun stack(ps: List<Pr>, k: Float): List<Sleeper>? {
+        private fun stack(ps: List<Pr>, k: Float, top: Float, coat: (Pr) -> Int): List<Sleeper>? {
             val n = ps.size
             val seed = IntArray(n) { ps[it].id.hashCode() }
             val sc = FloatArray(n) { val c = ps[it].additions + ps[it].deletions; k * when { c < 100 -> .62f; c < 1239 -> .78f; c < 5000 -> .95f; else -> 1.15f } }
@@ -1139,10 +1571,10 @@ class MergeFx(private val art: NixieArt) {
                     var b = 560f
                     for (m in 0 until q) if (box[4 * m] < x + cw && box[4 * m + 2] > x) b = min(b, box[4 * m + 1])
                     b -= 3f * k * rnd(seed[q], 0, 5)
-                    if (b - ch < 52f) return null
+                    if (b - ch < top) return null
                     box[4 * q] = x; box[4 * q + 1] = b - ch; box[4 * q + 2] = x + cw; box[4 * q + 3] = b
-                    out += Sleeper(x + cw / 2, b - ch / 2, sc[q], rnd(seed[q], 0, 6) < .3f, Math.floorMod(ps[q].repo.hashCode(), 4),
-                        seed[q], rnd(seed[q], 0, 7) < .33f)
+                    out += Sleeper(x + cw / 2, b - ch / 2, sc[q], rnd(seed[q], 0, 6) < .3f, coat(ps[q]),
+                        seed[q], rnd(seed[q], 0, 7) < .33f, ps[q], ghost(ps[q]))
                     x += cw + gap[q]
                 }
                 i = j; row++

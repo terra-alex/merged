@@ -45,6 +45,7 @@ class MeterActivity : Activity() {
     private val io = Executors.newSingleThreadExecutor()
     @Volatile private var polling = false
     private var fetching = false
+    private var refetch = false
     private var moving = false
     private var lastFetchMs = 0L
     private var openAt = 0L
@@ -70,7 +71,7 @@ class MeterActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         vault = Vault(this)
-        if (vault.token == null && demoMode() == null) {
+        if (vault.token == null && !vault.expired && demoMode() == null) {
             startActivity(Intent(this, SetupActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             finish()
             return
@@ -92,7 +93,8 @@ class MeterActivity : Activity() {
         view.onAnimating = { setRefreshRate(it) }
         view.debugCutoutPx = debugPrefs()?.getInt("cutout", 0) ?: 0
         Snapshot.load(this)?.let { last = it; lastFetchMs = it.fetchedAtMs; view.show(it, emptyList()) }
-        view.onLongPress = {
+        if (vault.token == null && vault.expired) view.tokenExpired()
+        view.onSetup = {
             // Setup belongs on the front screen, in its own task (taskAffinity="").
             startActivity(
                 Intent(this, SetupActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
@@ -121,6 +123,11 @@ class MeterActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        // After a reboot the meter can start on the front (Shizuku wasn't up yet); once it is, a resume moves it over.
+        if (display?.displayId == Display.DEFAULT_DISPLAY && !moving && RearRouter.status() == RearRouter.Status.READY) {
+            moving = true
+            main.postDelayed(moveToRear, 250)
+        }
         if (pausedAt > 0 && System.currentTimeMillis() - pausedAt > 30 * 60_000L) view.wake()
         // Back from OFF into doze: DozeService only allows ~300ms to draw, which a
         // thawing process can miss — push our own frame so the rear isn't left black.
@@ -148,17 +155,24 @@ class MeterActivity : Activity() {
 
     /**
      * Panel state changed (doze ↔ on): redraw, since frames drawn while it was suspended were dropped.
-     * When the rear comes on, re-register as its foreground app so HyperOS doesn't freeze us mid-touch.
+     * Leaving ON (dimming): home to Today, settled — Greeze may freeze us before DOZE_SUSPEND arrives (UX-PASS F17).
+     * Coming on: the 10-second window starts — roll the day, catch up if the last fetch is over a minute old
+     * (locked or not), and re-register as the rear's foreground app so HyperOS doesn't freeze us mid-touch.
      */
     private var pokedAt = 0L
     private var displayEventAt = 0L
+    private var shownState = Display.STATE_UNKNOWN
     private val displayListener = object : DisplayManager.DisplayListener {
         override fun onDisplayChanged(id: Int) {
             val d = display ?: return
             if (!::view.isInitialized || id != d.displayId) return
-            // Rear dimming with the front off: put Today up now — Greeze may freeze us before DOZE_SUSPEND arrives.
-            val frontOff = getSystemService(DisplayManager::class.java).getDisplay(Display.DEFAULT_DISPLAY)?.state == Display.STATE_OFF
-            if (d.displayId != Display.DEFAULT_DISPLAY && d.state != Display.STATE_ON && frontOff) view.dozing() else view.invalidate()
+            val was = shownState
+            shownState = d.state
+            if (d.state == Display.STATE_ON && was != Display.STATE_ON) {
+                view.rearOn()
+                if (polling && System.currentTimeMillis() - lastFetchMs > 60_000) { main.removeCallbacks(pollTick); main.post(pollTick) }
+            } else if (d.state != Display.STATE_ON) view.rearOff()
+            view.invalidate()
             // Frozen while the rear dozes, we never see it go dim — only that it's on again after a quiet gap.
             val now = System.currentTimeMillis()
             if (d.displayId != Display.DEFAULT_DISPLAY && d.state == Display.STATE_ON && now - displayEventAt > 5_000) pokeRear()
@@ -198,7 +212,7 @@ class MeterActivity : Activity() {
             Snapshot.load(this)?.let { publish(it) }
             return
         }
-        val token = vault.token ?: return view.signedOut()
+        val token = vault.token ?: return if (vault.expired && last != null) view.tokenExpired() else view.signedOut()
         if (fetching) return
         fetching = true
         val prev = last
@@ -208,38 +222,57 @@ class MeterActivity : Activity() {
             if (!polling) { main.post { fetching = false }; return@execute } // went invisible while queued
             val zone = ZoneId.systemDefault()
             val today = LocalDate.now(zone)
-            val result = runCatching {
+            val state = getSharedPreferences("state", MODE_PRIVATE)
+            // 1. Merged PRs: what the face shows, published before the slower open search and the backfill (UX-PASS F15).
+            val snap = runCatching {
                 val f = GitHub.fetchMerged(
                     token,
                     since = today.minusDays(WINDOW_DAYS - 1).atStartOfDay(zone).toOffsetDateTime(),
                     yearStart = today.withDayOfYear(1).atStartOfDay(zone).toOffsetDateTime(),
-                    withOpen = withOpen,
                 )
                 val prs = withoutGenerated(token, f.prs)
-                val state = getSharedPreferences("state", MODE_PRIVATE)
                 check(demoMode() == null) { "demo mode" } // switched to demo mid-fetch: don't wipe its seeded state
                 claim(state, f.login) // before recording, or publish's account switch would wipe the backfill
-                backfill(token, state, prs, today, zone, prev?.fetchedAtMs)
                 val same = prev?.login == f.login
                 Snapshot(f.login, prs, f.windowCount, f.ytd, f.lifetime, System.currentTimeMillis(),
-                    f.open ?: prev?.open.orEmpty().takeIf { same }.orEmpty(), if (f.open != null) f.openCount else if (same) prev?.openCount ?: 0 else 0)
+                    prev?.open.orEmpty().takeIf { same }.orEmpty(), if (same) prev?.openCount ?: 0 else 0)
+            }.getOrElse { e -> main.post { fetching = false; failed(token, e) }; return@execute }
+            deliver(token, snap, open = false)
+            // 2. Open PRs every 5 min; in between, one cheap call re-checks just the PRs we saw failing (UX-PASS #19).
+            val opened = if (withOpen) runCatching { GitHub.fetchOpen(token) }.onFailure { Log.w(TAG, "open PRs", it) }.getOrNull() else null
+            val watch = snap.open.filter { it.failing }.map { it.id }
+            val checks = if (opened == null && watch.isNotEmpty()) runCatching { GitHub.checks(token, watch) }
+                .onFailure { Log.w(TAG, "checks", it) }.getOrNull() else null
+            val next = when {
+                opened != null -> snap.copy(open = opened.first, openCount = opened.second)
+                checks != null && snap.open.any { p -> checks[p.id]?.let { it != p.checks } == true } ->
+                    snap.copy(open = snap.open.map { p -> checks[p.id]?.let { p.copy(checks = it) } ?: p })
+                else -> snap
             }
-            main.post {
-                fetching = false
-                if (isDestroyed || demoMode() != null) return@post
-                // Token changed mid-request (sign-out / new sign-in): this result is for someone else; fetch theirs now.
-                if (vault.token != token) { if (polling) refresh(); return@post }
-                result.onSuccess { snap ->
-                    lastFetchMs = snap.fetchedAtMs
-                    if (withOpen) { openAt = snap.fetchedAtMs; openToken = token }
-                    Snapshot.save(this, snap)
-                    publish(snap)
-                }.onFailure { e ->
-                    Log.w(TAG, "fetch failed", e)
-                    if (e is GitHub.AuthError) { vault.token = null; view.signedOut() } else view.markStale()
-                }
-            }
+            if (next !== snap) deliver(token, next, open = opened != null)
+            // 3. The streak's history, a few weeks a poll: republish only when it learned something.
+            val learned = runCatching { demoMode() == null && backfill(token, state, snap.prs, today, zone, prev?.fetchedAtMs) }.getOrDefault(false)
+            if (learned) deliver(token, next, open = false)
+            main.post { fetching = false; if (refetch) { refetch = false; if (polling) refresh() } }
         }
+    }
+
+    /** Main thread: save and show a poll's result — unless the token changed mid-request (then fetch theirs next). */
+    private fun deliver(token: String, snap: Snapshot, open: Boolean) = main.post {
+        if (isDestroyed || demoMode() != null) return@post
+        if (vault.token != token) { refetch = true; return@post }
+        lastFetchMs = snap.fetchedAtMs
+        if (open) { openAt = snap.fetchedAtMs; openToken = token }
+        Snapshot.save(this, snap)
+        publish(snap)
+    }
+
+    private fun failed(token: String, e: Throwable) {
+        if (isDestroyed || demoMode() != null) return
+        if (vault.token != token) { if (polling) refresh(); return } // a new sign-in mid-request: fetch theirs
+        Log.w(TAG, "fetch failed", e)
+        // A rejected token keeps the numbers (cooled, TOKEN EXPIRED); a tap on the rear opens Setup.
+        if (e is GitHub.AuthError) { vault.token = null; vault.expired = true; view.tokenExpired() } else view.markStale()
     }
 
     /**
@@ -263,19 +296,22 @@ class MeterActivity : Activity() {
      * merge ends it (52 weeks at most, 8 per poll). Once the history knows that day, later polls make no extra calls.
      * A failure just stops here; the next poll picks it up.
      */
-    private fun backfill(token: String, state: SharedPreferences, prs: List<Pr>, today: LocalDate, zone: ZoneId, lastFetchMs: Long?) {
+    private fun backfill(token: String, state: SharedPreferences, prs: List<Pr>, today: LocalDate, zone: ZoneId, lastFetchMs: Long?): Boolean {
         val window = (0 until WINDOW_DAYS).associate { today.minusDays(it) to 0 } +
             prs.groupingBy { Instant.ofEpochMilli(it.mergedAtMs).atZone(zone).toLocalDate() }.eachCount()
         var history = Progress.record(state, window, today)
         // The last poll's day was recorded mid-day; once it's out of the window it never gets corrected, so re-fetch it.
         lastFetchMs?.let { Instant.ofEpochMilli(it).atZone(zone).toLocalDate() }?.takeIf { it < today.minusDays(WINDOW_DAYS - 1) }
             ?.let { history = Progress.forget(state, it) }
+        var learned = false
         runCatching {
-            repeat(8) { // ≤ 8 weeks a poll (~1 s each), so a long first backfill doesn't hold up the publish
+            repeat(8) { // ≤ 8 weeks a poll (~1 s each)
                 val e = Progress.backfillBefore(history, today) ?: return@runCatching
                 history = Progress.record(state, GitHub.mergedDays(token, e.minusDays(7), e.minusDays(1), zone), today)
+                learned = true
             }
         }.onFailure { Log.w(TAG, "backfill", it) }
+        return learned
     }
 
     /** Different account → forget the old one's seen set, daily bests, history and badges. */
@@ -285,11 +321,12 @@ class MeterActivity : Activity() {
 
     /**
      * Polls only while visible (onResume..onPause), so a sleeping rear screen costs no radio.
-     * 45 s while a merge looks imminent (auto-merge on, or a PR that went ready in the last day), 15 min overnight, else 2 min.
+     * 45 s while a merge looks imminent (auto-merge on, or a PR that went ready in the last day) or a PR that failed
+     * in the last day is being watched for a fix (UX-PASS #19); 15 min in quiet hours; else 2 min.
      */
     private fun pollMs(s: Snapshot?): Long = when {
-        s?.open.orEmpty().any { it.autoMerge || it.status == OpenPr.Status.READY && System.currentTimeMillis() - it.updatedAtMs < 86_400_000L } -> 45_000L
-        LocalTime.now().hour.let { it >= 23 || it < 7 } -> 15 * 60_000L
+        Progress.quiet(Progress.quietStart(this), Progress.quietEnd(this), LocalTime.now().hour) -> 15 * 60_000L
+        s?.open.orEmpty().any { it.autoMerge || (it.failing || it.status == OpenPr.Status.READY) && System.currentTimeMillis() - it.updatedAtMs < 86_400_000L } -> 45_000L
         else -> 120_000L
     }
 

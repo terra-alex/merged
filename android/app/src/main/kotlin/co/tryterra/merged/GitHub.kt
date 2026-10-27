@@ -78,19 +78,16 @@ object GitHub {
         val windowCount: Int,
         val ytd: Int,
         val lifetime: Int,
-        /** The 50 most recently updated open PRs (null: not asked for); openCount is the search's issueCount. */
-        val open: List<OpenPr>?,
-        val openCount: Int,
     )
 
     /**
      * Every PR authored by the token's user and merged at/after [since], plus
      * year-to-date and lifetime merged counts. One GraphQL call per 100 PRs;
-     * GitHub search stops at 1000 results, so we stop there too. Then one call
-     * for the open PRs: as a fourth search in QUERY it took 8.5–10.8 s against
-     * GitHub's 10 s GraphQL timeout (HTTP 502); apart, each is ~4 s.
+     * GitHub search stops at 1000 results, so we stop there too. The open PRs
+     * are a separate call ([fetchOpen]): as a fourth search in QUERY it took
+     * 8.5–10.8 s against GitHub's 10 s GraphQL timeout (HTTP 502); apart, each is ~4 s.
      */
-    fun fetchMerged(token: String, since: OffsetDateTime, yearStart: OffsetDateTime, withOpen: Boolean = true): Fetched {
+    fun fetchMerged(token: String, since: OffsetDateTime, yearStart: OffsetDateTime): Fetched {
         val base = "author:@me is:pr is:merged"
         val vars = JSONObject()
             .put("w", "$base merged:>=${since.format(ISO)}")
@@ -139,11 +136,12 @@ object GitHub {
             if (!info.getBoolean("hasNextPage")) break
             after = info.getString("endCursor")
         }
-        if (!withOpen) return Fetched(login, prs.distinctBy { it.id }, windowCount, ytd, lifetime, null, 0)
-        // The open search failing (it's slow) mustn't throw away the merged counts: the caller keeps the last list.
-        val o = runCatching {
-            graphql(token, OPEN_QUERY, JSONObject().put("q", "author:@me is:pr is:open archived:false sort:updated-desc")).getJSONObject("open")
-        }.getOrElse { return Fetched(login, prs.distinctBy { it.id }, windowCount, ytd, lifetime, null, 0) }
+        return Fetched(login, prs.distinctBy { it.id }, windowCount, ytd, lifetime)
+    }
+
+    /** The 50 most recently updated open PRs, and the search's issueCount (may exceed 50). */
+    fun fetchOpen(token: String): Pair<List<OpenPr>, Int> {
+        val o = graphql(token, OPEN_QUERY, JSONObject().put("q", "author:@me is:pr is:open archived:false sort:updated-desc")).getJSONObject("open")
         val open = ArrayList<OpenPr>()
         val nodes = o.getJSONArray("nodes")
         for (i in 0 until nodes.length()) {
@@ -169,8 +167,28 @@ object GitHub {
                 base = n.optString("baseRefName"),
             )
         }
-        return Fetched(login, prs.distinctBy { it.id }, windowCount, ytd, lifetime, open, o.getInt("issueCount"))
+        return open to o.getInt("issueCount")
     }
+
+    /**
+     * Head-commit check state for just these open PRs (the ones we saw failing): one cheap nodes() call, so a fix going
+     * green shows within a poll instead of waiting for the 5-minute open search (UX-PASS #19). Missing ids: closed/hidden.
+     */
+    fun checks(token: String, ids: Collection<String>): Map<String, String> {
+        if (ids.isEmpty()) return emptyMap()
+        val nodes = graphql(token, CHECKS_QUERY, JSONObject().put("ids", JSONArray(ids.take(50)))).getJSONArray("nodes")
+        val out = HashMap<String, String>()
+        for (i in 0 until nodes.length()) {
+            val n = nodes.optJSONObject(i) ?: continue
+            if (!n.has("id") || n.optString("state") != "OPEN") continue
+            out[n.getString("id")] = n.optJSONObject("commits")?.optJSONArray("nodes")?.optJSONObject(0)?.optJSONObject("commit")
+                ?.optJSONObject("statusCheckRollup")?.optString("state").orEmpty()
+        }
+        return out
+    }
+
+    /** The token's login (Setup's "Signed in as"). Throws [AuthError] on a rejected token. */
+    fun viewer(token: String): String = graphql(token, "query { viewer { login } }", JSONObject()).getJSONObject("viewer").getString("login")
 
     // ---- Generated files (lockfiles, snapshots, build output): their lines don't count
 
@@ -290,6 +308,9 @@ object GitHub {
           }
         }
     """.trimIndent()
+
+    private const val CHECKS_QUERY = "query(\$ids: [ID!]!) { nodes(ids: \$ids) { ... on PullRequest { id state " +
+        "commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } } }"
 
     private const val FILES = "files(first: 100, after: \$after) { pageInfo { hasNextPage endCursor } nodes { path additions deletions } }"
     private const val GEN_QUERY = "query(\$ids: [ID!]!, \$after: String) { nodes(ids: \$ids) { ... on PullRequest { id $FILES } } }"

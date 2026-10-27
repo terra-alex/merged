@@ -23,8 +23,9 @@ import rikka.shizuku.Shizuku
 import kotlin.concurrent.thread
 
 /**
- * Front-screen setup: GitHub sign-in (Device Flow, or paste a token), Shizuku
- * grant for rear-screen routing, and a button to start the meter.
+ * Front-screen setup: GitHub sign-in (Device Flow, or paste a token), Shizuku grant for rear-screen
+ * routing, daily goal, quiet hours, and starting the meter. Each problem says what's wrong and offers
+ * the one button that fixes it (UX-PASS #15). After Start it stays up, pointing you at the back.
  */
 class SetupActivity : Activity() {
 
@@ -33,8 +34,12 @@ class SetupActivity : Activity() {
     private lateinit var account: TextView
     private lateinit var code: TextView
     private lateinit var shizuku: TextView
+    private lateinit var shizukuButton: Button
+    private lateinit var start: Button
+    private lateinit var started: TextView
     @Volatile private var signInRun = 0
     @Volatile private var poller: Thread? = null
+    @Volatile private var checked: String? = null // the token whose login we've confirmed with GitHub
 
     private val shizukuListener = Shizuku.OnRequestPermissionResultListener { _, _ -> refresh() }
 
@@ -55,14 +60,20 @@ class SetupActivity : Activity() {
             setTypeface(typeface, Typeface.BOLD)
             setPadding(0, pad, 0, dp(6))
         })
+        fun note(t: String) = root.addView(TextView(this).apply { text = t; alpha = 0.7f })
         fun button(t: String, onClick: () -> Unit) = Button(this).apply {
             text = t
             setOnClickListener { onClick() }
             root.addView(this)
         }
+        fun hours(value: Int, onChange: (Int) -> Unit) = NumberPicker(this).apply {
+            minValue = 0; maxValue = 23; this.value = value
+            setFormatter { "%02d:00".format(it) }
+            setOnValueChangedListener { _, _, n -> onChange(n) }
+        }
 
         root.addView(TextView(this).apply { text = "Merged"; textSize = 32f; setTypeface(typeface, Typeface.BOLD) })
-        root.addView(TextView(this).apply { text = "Your merged PRs, on the back of your phone."; alpha = 0.7f })
+        note("Your merged PRs, on the back of your phone.")
 
         header("GITHUB")
         account = TextView(this).also { root.addView(it) }
@@ -88,19 +99,22 @@ class SetupActivity : Activity() {
             tokenField.text.clear()
             refresh()
         }
-        button("Sign out") { vault.token = null; Snapshot.clear(this); refresh() }
+        button("Sign out") { vault.token = null; vault.expired = false; Snapshot.clear(this); refresh() }
 
         header("REAR SCREEN")
         shizuku = TextView(this).also { root.addView(it) }
-        button("Grant Shizuku permission") {
-            if (runCatching { Shizuku.pingBinder() }.getOrDefault(false) &&
-                Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED
-            ) Shizuku.requestPermission(REQ_SHIZUKU)
+        shizukuButton = button("Grant Shizuku permission") {
+            when (RearRouter.status()) {
+                RearRouter.Status.SHIZUKU_OFF -> packageManager.getLaunchIntentForPackage(SHIZUKU_PKG)
+                    ?.let { startActivity(it) } ?: startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://shizuku.rikka.app/download/")))
+                RearRouter.Status.NO_PERMISSION -> Shizuku.requestPermission(REQ_SHIZUKU)
+                RearRouter.Status.READY -> Unit
+            }
             refresh()
         }
 
         header("DAILY GOAL")
-        root.addView(TextView(this).apply { text = "Merged PRs a day that count as goal met."; alpha = 0.7f })
+        note("Merged PRs a day that count as goal met.")
         root.addView(NumberPicker(this).apply {
             minValue = 1
             maxValue = 30
@@ -110,12 +124,28 @@ class SetupActivity : Activity() {
             setOnValueChangedListener { _, _, n -> Progress.setGoal(this@SetupActivity, n); MeterActivity.poke?.invoke() }
         })
 
+        header("QUIET HOURS")
+        note("No cats, no sounds, slower polling. From, until (the same hour: never quiet).")
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_HORIZONTAL; root.addView(this) }
+        row.addView(hours(Progress.quietStart(this)) { Progress.setQuiet(this, it, Progress.quietEnd(this)); MeterActivity.poke?.invoke() })
+        row.addView(TextView(this).apply { text = "  →  "; textSize = 20f })
+        row.addView(hours(Progress.quietEnd(this)) { Progress.setQuiet(this, Progress.quietStart(this), it); MeterActivity.poke?.invoke() })
+
+        header("ON THE BACK")
+        note(LEGEND)
+
         header("GO")
-        button("Start Merged") {
+        start = button("Start Merged") {
             // A meter already running on the rear screen just re-fetches; don't stack a second one.
             MeterActivity.poke?.invoke()
                 ?: startActivity(Intent(this, MeterActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            finish()
+            started.visibility = TextView.VISIBLE // stay up: the meter is on the back now, not here
+        }
+        started = TextView(this).apply {
+            text = "On the back screen ✓ — flip the phone and double-tap it."
+            setPadding(0, dp(8), 0, 0)
+            visibility = TextView.GONE
+            root.addView(this)
         }
 
         setContentView(ScrollView(this).apply { fitsSystemWindows = true; addView(root) }) // clear the status bar (edge-to-edge)
@@ -136,16 +166,42 @@ class SetupActivity : Activity() {
     }
 
     private fun refresh() {
+        val token = vault.token
         val snap = Snapshot.load(this)
         account.text = when {
-            vault.token == null -> "Not signed in."
+            token == null && vault.expired -> "GitHub rejected the token — sign in again."
+            token == null -> "Not signed in."
             snap != null && snap.login.isNotEmpty() -> "Signed in as @${snap.login} ✓"
-            else -> "Token saved ✓"
+            else -> "Checking the token…"
         }
+        start.isEnabled = token != null
+        if (token != null && (snap == null || snap.login.isEmpty()) && checked != token) verify(token)
         shizuku.text = when (RearRouter.status()) {
-            RearRouter.Status.READY -> "Shizuku ready ✓ — Merged will move itself to the rear screen."
-            RearRouter.Status.NO_PERMISSION -> "Shizuku is running but hasn't authorized Merged — tap Grant."
-            RearRouter.Status.SHIZUKU_OFF -> "Shizuku isn't running. Without it Merged shows on this screen."
+            RearRouter.Status.READY -> "Shizuku ready ✓ — Merged moves itself to the rear screen."
+            RearRouter.Status.NO_PERMISSION -> "Shizuku is running but hasn't authorized Merged."
+            RearRouter.Status.SHIZUKU_OFF -> "Shizuku isn't running (it stops on reboot). Without it Merged shows on this screen."
+        }
+        shizukuButton.text = when (RearRouter.status()) {
+            RearRouter.Status.SHIZUKU_OFF -> "Open Shizuku"
+            RearRouter.Status.NO_PERMISSION -> "Grant Shizuku permission"
+            RearRouter.Status.READY -> "Shizuku ready"
+        }
+        shizukuButton.isEnabled = RearRouter.status() != RearRouter.Status.READY
+    }
+
+    /** Ask GitHub whose token this is, off the main thread ("Signed in as @…", or that it was rejected). */
+    private fun verify(token: String) {
+        checked = token
+        thread {
+            val r = runCatching { GitHub.viewer(token) }
+            main.post {
+                if (isDestroyed || vault.token != token) return@post
+                r.onSuccess { account.text = "Signed in as @$it ✓" }
+                    .onFailure { e ->
+                        if (e is GitHub.AuthError) { vault.token = null; vault.expired = true; refresh() }
+                        else account.text = "Token saved ✓ (couldn't reach GitHub to check it)"
+                    }
+            }
         }
     }
 
@@ -196,5 +252,14 @@ class SetupActivity : Activity() {
 
     private companion object {
         const val REQ_SHIZUKU = 4242
+        const val SHIZUKU_PKG = "moe.shizuku.privileged.api"
+        /** The gesture grammar (UX-PASS §4), in the words the rear's hints use. */
+        val LEGEND = """
+            Swipe left or right: the next screen. Tap: the next screen, or whatever you tap (a row, a badge, a count).
+            Double-tap Today: replay the last merge. Tap a flying cat during a merge: pop it.
+            Hold, then drag: a pet cat follows your finger (fling it: fireworks). On the cat screen: a laser dot.
+            Cats: tap one to meet its PR (again for the details), rub one back and forth, tap the header to wake them.
+            Hold still for 1.5 s: this screen.
+        """.trimIndent()
     }
 }

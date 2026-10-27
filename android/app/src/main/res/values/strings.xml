@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="setup_short">Setup</string>
+    <string name="setup_long">Merged setup</string>
+</resources>

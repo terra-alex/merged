@@ -20,6 +20,7 @@ import java.time.ZoneId
  *     --ei merge 1200                    # fake a PR merging now (+1200 lines)
  *     --ei cutout 296                    # emulator: pretend the camera covers the left 296px
  *     --ez day true|false                # no night mode (filming after 23:00)
+ *     --ez season false                  # no seasonal cat coats (README stills in Halloween week)
  *     --es show <cmd>                    # hand a command to the resumed MeterView (MeterView.debug)
  *     --ei goal 12                       # daily goal
  *     --es badges reset                  # forget every earned badge
@@ -44,6 +45,7 @@ class DebugReceiver : BroadcastReceiver() {
         if (intent.getStringExtra("badges") == "reset") BadgeBook(context.getSharedPreferences("state", Context.MODE_PRIVATE)).reset()
         if (intent.hasExtra("cutout")) prefs.edit().putInt("cutout", intent.getIntExtra("cutout", 0)).apply()
         if (intent.hasExtra("day")) prefs.edit().putBoolean("day", intent.getBooleanExtra("day", false)).apply()
+        if (intent.hasExtra("season")) prefs.edit().putBoolean("noSeason", !intent.getBooleanExtra("season", true)).apply()
         if (intent.hasExtra("merge")) {
             val snap = Snapshot.load(context)
             if (snap != null) {

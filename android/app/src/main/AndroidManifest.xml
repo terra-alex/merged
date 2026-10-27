@@ -7,6 +7,11 @@
     <!-- Buzz on merge. -->
     <uses-permission android:name="android.permission.VIBRATE"/>
 
+    <!-- Setup's "Open Shizuku" (package visibility, Android 11+). -->
+    <queries>
+        <package android:name="moe.shizuku.privileged.api"/>
+    </queries>
+
     <application
         android:label="Merged"
         android:icon="@mipmap/ic_launcher"
@@ -31,6 +36,7 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts"/>
         </activity>
 
         <!-- Own task (empty affinity) so long-pressing the rear meter opens Setup on

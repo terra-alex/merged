@@ -15,6 +15,7 @@ import org.json.JSONObject
 import java.time.DayOfWeek
 import java.time.Instant
 import java.time.LocalDate
+import java.time.LocalDateTime
 import java.time.ZoneId
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
@@ -72,12 +73,17 @@ class BadgeBook(private val prefs: SharedPreferences) {
     fun earnedSince(day: LocalDate): List<Badge> = Badge.entries.filter { last(it)?.isBefore(day) == false }
     val total: Int get() { load(); return counts.count { it > 0 } }
 
+    /**
+     * ON A ROLL was already earned in the run that started on [streakStart]. Once per run, and the run's start moves
+     * earlier while the backfill is still filling the history, so any award on or after it counts.
+     */
+    fun rolled(streakStart: LocalDate?): Boolean = streakStart != null && load().keys.any { k -> k.startsWith("ON_A_ROLL:") &&
+        runCatching { LocalDate.parse(k.substringAfter(':')) }.getOrNull()?.let { it >= streakStart } == true }
+
     fun evaluate(s: Snapshot, zone: ZoneId, goal: Int, streak: Int, streakStart: LocalDate?, prevLifetime: Int?): List<Earned> {
         val today = Instant.ofEpochMilli(s.fetchedAtMs).atZone(zone).toLocalDate()
         val have = load()
-        // ON A ROLL is once per run, but the run's start moves earlier while the backfill is still filling the history.
-        val rolled = streakStart != null && have.keys.any { k -> k.startsWith("ON_A_ROLL:") &&
-            runCatching { LocalDate.parse(k.substringAfter(':')) }.getOrNull()?.let { it >= streakStart } == true }
+        val rolled = rolled(streakStart)
         val new = awards(s.prs, zone, goal, streak, streakStart, s.lifetime, prevLifetime, today)
             .filter { it.key !in have && !(rolled && it.badge == Badge.ON_A_ROLL) }
         if (new.isNotEmpty() || !prefs.contains(KEY)) { // the first evaluation is written even when empty: it's the silent one
@@ -118,6 +124,39 @@ class BadgeBook(private val prefs: SharedPreferences) {
             if (streak >= 5 && streakStart != null) award(Badge.ON_A_ROLL, today, streakStart)
             if (prevLifetime != null && lifetime / 100 > prevLifetime / 100) award(Badge.CENTURY, today, lifetime / 100 * 100)
             return out
+        }
+
+        /**
+         * How close a badge is (UX-PASS #17): the detail card's line, and the shelf's short form under a locked badge
+         * (null: nothing worth a fraction). [today] / [week]: the PRs merged today / this week.
+         */
+        fun progress(b: Badge, today: List<Pr>, week: List<Pr>, goal: Int, streak: Int, rolled: Boolean, lifetime: Int,
+                     now: LocalDateTime): Pair<String, String?> {
+            val adds = today.sumOf { it.additions }
+            val dels = today.sumOf { it.deletions }
+            return when (b) {
+                Badge.NET_NEGATIVE -> "TODAY +%,d −%,d".format(adds, dels) to null
+                Badge.EARLY_BIRD -> when {
+                    now.hour in 5..8 -> "NOW · UNTIL 9 AM"
+                    now.hour < 5 -> "NEXT CHANCE · 5 AM"
+                    else -> "NEXT CHANCE · TOMORROW 5 AM"
+                } to null
+                Badge.TEN_K -> "TODAY %,d / 10,000 LINES".format(adds + dels) to "${(adds + dels) / 100 / 10.0}K/10K"
+                Badge.FRIDAY -> (if (now.dayOfWeek == DayOfWeek.FRIDAY && now.hour >= 17) "NOW · ANY MERGE COUNTS"
+                    else "NEXT CHANCE · FRI FROM 5 PM") to null
+                Badge.SPEEDRUN -> (week.filter { it.createdAtMs > 0 }.minOfOrNull { it.mergedAtMs - it.createdAtMs }
+                    ?.let { "FASTEST THIS WEEK · " + span(it) } ?: "NO TIMED MERGES THIS WEEK") to null
+                Badge.GOAL -> "TODAY ${today.size} / $goal" to "${today.size}/$goal"
+                Badge.ON_A_ROLL -> if (rolled) "EARNED THIS RUN" to null else "STREAK ${min(streak, 5)} / 5" to "${min(streak, 5)}/5"
+                Badge.CENTURY -> (100 - lifetime % 100).let { n ->
+                    "$n ${if (n == 1) "PR" else "PRs"} TO #%,d".format((lifetime / 100 + 1) * 100) to "$n TO GO"
+                }
+            }
+        }
+
+        private fun span(ms: Long): String {
+            val m = ms / 60_000
+            return when { m < 1 -> "UNDER A MINUTE"; m < 60 -> "$m MIN"; else -> "${m / 60}H ${m % 60}M" }
         }
     }
 }

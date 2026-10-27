@@ -22,6 +22,18 @@ object Progress {
     fun goal(ctx: Context): Int = settings(ctx).getInt("goal", DEFAULT_GOAL).coerceIn(1, 99)
     fun setGoal(ctx: Context, n: Int) { settings(ctx).edit().putInt("goal", n.coerceIn(1, 99)).apply() }
 
+    // Quiet hours (UX-PASS #16): no cats, no sounds, no shows, slow polling. Whole local hours.
+    fun quietStart(ctx: Context): Int = settings(ctx).getInt("quietStart", 23)
+    fun quietEnd(ctx: Context): Int = settings(ctx).getInt("quietEnd", 7)
+    fun setQuiet(ctx: Context, start: Int, end: Int) { settings(ctx).edit().putInt("quietStart", start).putInt("quietEnd", end).apply() }
+
+    /** [hour] in [start, end), wrapping midnight; start == end: never quiet. */
+    fun quiet(start: Int, end: Int, hour: Int) = when {
+        start == end -> false
+        start < end -> hour in start until end
+        else -> hour >= start || hour < end
+    }
+
     /** Per-day merged-PR counts, prefs "state" key "daily" (JSON ISO date -> count). Kept 400 days. */
     fun history(prefs: SharedPreferences): Map<LocalDate, Int> {
         val j = runCatching { JSONObject(prefs.getString("daily", "{}")!!) }.getOrDefault(JSONObject())
@@ -90,12 +102,51 @@ object Progress {
         }
     }
 
+    /** Best day before [today] (today is still running); 0 when the history has none. */
+    fun bestDay(days: Map<LocalDate, Int>, today: LocalDate): Int = days.filterKeys { it < today }.values.maxOrNull() ?: 0
+
+    /** Best Monday-to-Sunday week in the history, this one included. */
+    fun bestWeek(days: Map<LocalDate, Int>): Int =
+        days.entries.groupBy { it.key.with(DayOfWeek.MONDAY) }.values.maxOfOrNull { w -> w.sumOf { it.value } } ?: 0
+
+    /** Last week's count for each weekday Mon..Sun (days the history doesn't know read 0). */
+    fun lastWeek(days: Map<LocalDate, Int>, today: LocalDate): IntArray {
+        val mon = today.with(DayOfWeek.MONDAY).minusDays(7)
+        return IntArray(7) { days[mon.plusDays(it.toLong())] ?: 0 }
+    }
+
+    /** Biggest PR (lines changed) and fastest merge (whole minutes from opened to merged) seen since [since] (install). */
+    class Records(val biggest: Int, val fastestMin: Int?, val since: LocalDate?)
+
+    fun records(prefs: SharedPreferences): Records {
+        val j = runCatching { JSONObject(prefs.getString("records", "{}")!!) }.getOrDefault(JSONObject())
+        return Records(j.optInt("biggest"), if (j.has("fastest")) j.getInt("fastest") else null,
+            j.optString("since").takeIf { it.isNotEmpty() }?.let { runCatching { LocalDate.parse(it) }.getOrNull() })
+    }
+
+    /**
+     * Fold [prs] into the persisted records (prefs "state" key "records"); returns them. Only PRs whose generated files
+     * were taken out count for the biggest: a failed check would make a lockfile a record forever.
+     */
+    fun recordPrs(prefs: SharedPreferences, prs: List<Pr>, today: LocalDate = LocalDate.now()): Records {
+        val r = records(prefs)
+        val big = max(r.biggest, prs.filter { it.genChecked }.maxOfOrNull { it.additions + it.deletions } ?: 0)
+        val fast = (listOfNotNull(r.fastestMin) + prs.filter { it.createdAtMs > 0 }.map { minutes(it) }).minOrNull()
+        val since = r.since ?: today
+        if (big != r.biggest || fast != r.fastestMin || r.since == null)
+            prefs.edit().putString("records", JSONObject().put("biggest", big).put("since", since.toString())
+                .apply { if (fast != null) put("fastest", fast) }.toString()).apply()
+        return Records(big, fast, since)
+    }
+
+    fun minutes(p: Pr) = ((p.mergedAtMs - p.createdAtMs) / 60_000).toInt().coerceAtLeast(0)
+
     class Week(
         val start: LocalDate,            // Monday of this week
         val perDay: IntArray,            // 7 counts Mon..Sun (future days 0)
         val prs: Int, val adds: Int, val dels: Int,   // lines exclude generated files (Pr fields already do)
         val goalDays: Int,               // days this week with count >= goal
-        val workdaysSoFar: Int,          // Mon..Fri up to today, plus weekend days that met the goal
+        val workdaysSoFar: Int,          // weekdays before today, today once it met the goal, weekend days that met it
         val best: Pr?,                   // max additions+deletions this week
     )
 
@@ -110,8 +161,11 @@ object Progress {
             perDay[d.dayOfWeek.value - 1]++
         }
         return Week(start, perDay, mine.size, mine.sumOf { it.additions }, mine.sumOf { it.deletions },
-            // A weekend day only joins the denominator if it met the goal, so it reads e.g. 6 / 6, never 6 / 5.
-            perDay.count { it >= goal }, min(today.dayOfWeek.value, 5) + perDay.drop(5).count { it >= goal },
+            // Today joins the denominator once it meets the goal (so Tuesday morning doesn't read as a miss), and a weekend
+            // day only if it met the goal, so it reads e.g. 6 / 6, never 6 / 5.
+            perDay.count { it >= goal }, today.dayOfWeek.value.let { dow ->
+                min(dow - 1, 5) + (if (dow <= 5 && perDay[dow - 1] >= goal) 1 else 0) + perDay.drop(5).count { it >= goal }
+            },
             mine.maxByOrNull { it.additions + it.deletions })
     }
 }

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Long-press the launcher icon: Setup, without having to long-press the rear (UX-PASS F8). -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="setup"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/setup_short"
+        android:shortcutLongLabel="@string/setup_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="co.tryterra.merged"
+            android:targetClass="co.tryterra.merged.SetupActivity" />
+    </shortcut>
+</shortcuts>
