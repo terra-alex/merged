@@ -14,17 +14,17 @@ Swipe left and right through eight views: Today, Recent, Streak, Week, All-time,
 
 | | |
 |---|---|
-| <img src="docs/media/today.jpg" alt="Today"><br>**Today.** PRs merged today in two big tubes, lines added (neon) and removed (argon violet), the last 7 days' count, and when it last synced. | <img src="docs/media/recent.jpg" alt="Recent"><br>**Recent.** Your last 5 merges as a departures board; the banks show each one's +/−. Tap a row for its details. |
+| <img src="docs/media/today.jpg" alt="Today"><br>**Today.** PRs merged today in two big tubes, lines added (neon) and removed (argon violet), the last 7 days' count, and when it last synced. | <img src="docs/media/recent.jpg" alt="Recent"><br>**Recent.** Your last 5 merges as a departures board. The highlight steps through them once and the banks show each one's +/−. Tap a row for its details. |
 | <img src="docs/media/streak.jpg" alt="Streak"><br>**Streak.** Your workday streak (weekends never break it), your best, how many to go today, and an IN-13-style bargraph filling towards the goal. | <img src="docs/media/week.jpg" alt="Week"><br>**Week.** This week replayed day by day over last week's counts: PRs, lines, the best PR, goal days, badges, and how you're doing against last week. It plays by itself once a week from Friday 17:00. |
 | <img src="docs/media/alltime.jpg" alt="All-time"><br>**All-time.** The lifetime count on an odometer, and your records: best day, best week, biggest PR, fastest merge. | <img src="docs/media/badges.jpg" alt="Badges"><br>**Badges.** Eight achievements drawn as Nixie cathode icons, each with its own unlock animation: Net Negative, Early Bird, 10K Day, Friday Ship, Speedrun, Goal Met, On a Roll, Century. Locked ones show how close you are. |
-| <img src="docs/media/cats.jpg" alt="Cats"><br>**Cats.** A sleeping pixel cat for every PR merged this week, sized by PR and coloured by repo (with the odd rare gold or ghost one). Tap one to meet its PR, rub one for hearts and a purr, hold and drag for a laser dot. New cats fly in when you visit; open PRs that are ready wait on a shelf as kittens. | <img src="docs/media/open.jpg" alt="Open PRs"><br>**Open PRs.** Status lights for your open PRs (ready, waiting, needs you; tap a count to list just those), with an alert when one turns green or red, and a cat to fix the jewel when failing checks go green. |
+| <img src="docs/media/cats.jpg" alt="Cats"><br>**Cats.** A sleeping pixel cat for every PR merged this week, sized by PR and coloured by repo (pumpkins in the last week of October, and the odd rare gold or ghost one). Tap one to meet its PR (again for the details), rub one for hearts and a purr, tap the header to wake them all, hold and drag for a laser dot. New cats fly in when you visit; open PRs that are ready wait on a shelf as kittens. | <img src="docs/media/open.jpg" alt="Open PRs"><br>**Open PRs.** Status lights for your open PRs (ready, waiting, needs you; tap a count to list just those), with an alert when one turns green or red, and a cat to fix the jewel when failing checks go green. |
 
 ## What happens when a PR merges
 
 - **Cats, then fire.** One to five cats with rainbow trails and flaming butts roam the screen; the PR's own cat dives home under the camera and the rest burst into firework mini-cats (tap them to pop them early; pop them all for a gold one). Then the camera island strikes, a burner rail lights, and the changed digits catch fire. The bigger the PR (S, M, L, XL), the bigger the moment; small ones skip the cats and just land. See `design/FX.md`.
 - **The line banks show that PR's own +/−,** then roll up to the day's totals.
 - **A buzz and a chime,** following your ringer: silent or DND, nothing; vibrate, a buzz; ringer on, a buzz and an 8-bit chime with the strike. Small merges just tick. Off in quiet hours.
-- **One showcase, if there's time.** The rear only stays fully on for about 10 s, so a merge gets at most one: a new badge's unlock, else the goal surge, else a rescued or changed open PR. Anything that doesn't fit waits: a badge shows NEW and unlocks when you visit Badges.
+- **One showcase, if there's time.** The rear only stays fully on for its screen timeout (10 s by default), so a merge gets at most one: a new badge's unlock, else the goal surge, else a rescued or changed open PR. Anything that doesn't fit waits: a badge shows NEW and unlocks when you visit Badges. Charging with **Stay awake** on (developer options)? The rear never dims, so every merge plays live.
 - **Missed it?** If a merge lands while the rear is dim, you get the buzz then, and the moment when you next wake the rear (or a cat peeks out under the camera: tap it to replay).
 - **News.** The label after the numbers says when you hit the goal or broke a record.
 - **Line counts are honest.** Lockfiles, snapshots and built JS/CSS don't count.
@@ -37,7 +37,7 @@ Swipe left and right through eight views: Today, Recent, Streak, Week, All-time,
 - **Hold still for 1.5 s** to open Setup on the front screen (GitHub sign-in, Shizuku, daily goal, quiet hours). The rear says so. The launcher icon's long-press menu has Setup too.
 - Each screen shows its gesture once, until you've used it. Every touch answers with a tick.
 
-The rear screen dims 10 s after the last touch. Once it's dim, the first double-tap only wakes it. The full gesture grammar is in `design/UX-PASS.md`.
+The rear screen dims after its timeout: 10 s after it wakes or is last touched, by default (Merged reads the setting). Once it's dim, the first double-tap only wakes it. The full gesture grammar is in `design/UX-PASS.md`.
 
 ## How it runs on the rear screen
 
@@ -56,7 +56,7 @@ Built to cost about as much as a stock rear-screen face, not a live wallpaper th
 - **The cats** only move when you touch them or a merge lands: a poke, a rub, a lap, a laser chase, a few seconds of arrivals when you visit. Otherwise the colony is one static frame.
 - **Ambient redraws:** a ±3px burn-in drift (checked every 5 min, and pushed to the dozing panel only when it actually moves) and a tube sweep every 15 min, which runs only while the rear is awake.
 - **Refresh rate:** it requests the panel's slowest mode at rest and about 60Hz only while animating. HyperOS ignores this on the rear panel (it stays at 120Hz), so this only matters on the front screen.
-- **Always-on:** Merged uses the stock rear doze. About 16 s after the rear wakes, Xiaomi's DozeService dims the panel into self-refresh (DOZE_SUSPEND). Merged stays on top, so its last frame shows at the light-sensor doze brightness (1–35 nits), the same way the stock face does. While dozing it doesn't animate. Number changes reach the panel through a 500 ms DRAW wake lock push. The rear still goes black on the stock rules: pocket, dark room, or 90 s after unlocking. See `design/REAR-AOD.md`.
+- **Always-on:** Merged uses the stock rear doze. When the rear's timeout runs out, Xiaomi's DozeService dims the panel and, a couple of seconds later, puts it into self-refresh (DOZE_SUSPEND). Merged stays on top, so its last frame shows at the light-sensor doze brightness (1–35 nits), the same way the stock face does. While dozing it doesn't animate. Number changes reach the panel through a 500 ms DRAW wake lock push. The rear still goes black on the stock rules: pocket, dark room, or 90 s after unlocking. See `design/REAR-AOD.md`.
 - **Network:** it polls GitHub only while visible (HyperOS freezes Merged while the phone is idle, so it catches up when you next use the phone):
   - every 2 min normally;
   - every 15 min in quiet hours (23:00 to 07:00 by default);
@@ -81,7 +81,7 @@ Setup (on the front screen) offers two ways:
 1. **Sign in with GitHub** uses Device Flow. It needs an OAuth App client id at build time. Create the app at github.com/settings/applications/new: any homepage and callback URL will do, and you must tick **Enable Device Flow**. Then add `githubClientId=Iv1.xxxx` (or `Ov23…`) to `android/local.properties` or `~/.gradle/gradle.properties`. The scope is `repo`, the only OAuth scope that lets search see private-repo PRs. If an org restricts OAuth apps, an owner has to approve the app for that org.
 2. **Paste a token:** a classic PAT with `repo` scope. This works with no OAuth app at all.
 
-The token is stored AES-GCM-sealed with an Android Keystore key (`Vault.kt`).
+The token is stored AES-GCM-sealed with an Android Keystore key (`Vault.kt`). If GitHub rejects it later, the rear keeps your last numbers under TOKEN EXPIRED; tap it to open Setup.
 
 ## Build, test, install
 
@@ -101,7 +101,8 @@ $B --es token "$(gh auth token)"   # real data
 $B --es demo big|quiet|zero|off    # canned days
 $B --ez season false               # no seasonal cat coats
 $B --ei merge 50|500|2000|6000     # fake a merge: S / M / L / XL (shown over real data until the next poll)
-$B --es show goal|badge:EARLY_BIRD|open|rescue|recap|cats|arrive|peek|missed|hints|screen:STREAK   # a showcase, a cat trick, a screen
+$B --es show goal|badge:EARLY_BIRD|badge:all|open|rescue|recap|cats|arrive|peek|missed|hints|screen:STREAK   # a showcase, a cat trick, a screen
+$B --es show buzz:S|buzz:M|buzz:L|buzz:XL|rearon|rearoff   # a merge buzz; pretend the rear woke or dimmed
 $B --ei goal 3                     # daily goal
 $B --es badges reset               # forget earned badges
 ```
